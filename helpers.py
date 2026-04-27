@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Tuple
+import math
 import torch
 import torch.nn.functional as F
 
@@ -37,10 +38,21 @@ def _mask_grow(mask: torch.Tensor, expand: int, blur: int) -> torch.Tensor:
     m = mask.unsqueeze(1).float()
 
     if expand > 0:
-        k = 2 * expand + 1
-        kernel = torch.ones(1, 1, k, k, device=mask.device, dtype=m.dtype)
-        m = F.pad(m, (expand, expand, expand, expand), mode="replicate")
-        m = F.conv2d(m, kernel, padding=0)
+        try:
+            import kornia.morphology as morph
+            # 3×3 dilation kernel iterated expand times — GPU-accelerated via kornia.
+            # Processes the full batch at once, O(n * expand) but highly optimised.
+            kernel = torch.ones(3, 3, device=mask.device, dtype=m.dtype)
+            for _ in range(expand):
+                m = morph.dilation(m, kernel)
+        except ImportError:
+            # Fallback: chunked max-pool — still much faster than a single huge conv kernel
+            remaining = expand
+            for k in (32, 8, 2, 1):
+                while remaining >= k:
+                    m = F.pad(m, (k, k, k, k), mode="replicate")
+                    m = F.max_pool2d(m, kernel_size=2 * k + 1, stride=1, padding=0)
+                    remaining -= k
         m = m.clamp(0.0, 1.0)
 
     if blur > 0:
@@ -63,41 +75,83 @@ def _mask_grow(mask: torch.Tensor, expand: int, blur: int) -> torch.Tensor:
 # Resolution helpers
 # ---------------------------------------------------------------------------
 
-_TARGET_PIXELS = 1_048_576  # 1 MP — Flux Klein sweet spot
+_MEGAPIXEL_OPTIONS = {
+    "1 MP":  1_048_576,
+    "2 MP":  2_097_152,
+    "3 MP":  3_145_728,
+    "4 MP":  4_194_304,
+}
+
+# (w_parts, h_parts) for each named ratio — None means "derive from ref_0 or custom"
+_ASPECT_RATIO_OPTIONS = {
+    "As Reference": None,
+    "1:1":    (1, 1),
+    "4:3":    (4, 3),
+    "3:4":    (3, 4),
+    "16:9":   (16, 9),
+    "9:16":   (9, 16),
+    "3:2":    (3, 2),
+    "2:3":    (2, 3),
+    "21:9":   (21, 9),
+    "9:21":   (9, 21),
+    "Custom": None,
+}
 
 
 def _round8(v: int) -> int:
     return max(8, (v + 7) // 8 * 8)
 
 
-def _clamp_to_megapixel(width: int, height: int) -> Tuple[int, int]:
-    if width * height <= _TARGET_PIXELS:
-        return _round8(width), _round8(height)
-    scale = (_TARGET_PIXELS / (width * height)) ** 0.5
+def _scale_to_megapixels(width: int, height: int, target_pixels: int) -> Tuple[int, int]:
+    """Scale (width, height) proportionally to exactly target_pixels, rounded to ×8."""
+    scale = (target_pixels / (width * height)) ** 0.5
     return _round8(int(width * scale)), _round8(int(height * scale))
 
 
+def _clamp_to_megapixel(width: int, height: int, target_pixels: int = 1_048_576) -> Tuple[int, int]:
+    if width * height <= target_pixels:
+        return _round8(width), _round8(height)
+    return _scale_to_megapixels(width, height, target_pixels)
+
+
 def _resolve_resolution(
-    image: Optional[torch.Tensor],
-    width: int,
-    height: int,
-    keep_aspect_ratio: bool,
+    aspect_ratio: str,
+    megapixels: str,
+    custom_width: int,
+    custom_height: int,
+    ref_image: Optional[torch.Tensor] = None,
 ) -> Tuple[int, int]:
     """
-    keep_aspect_ratio=True  — longest of (width, height) sets the target longest side;
-                              the other dimension is derived from ref_0's aspect ratio.
-                              Falls back to (width, height) when no image is connected.
-    keep_aspect_ratio=False — returns (width, height) unchanged.
-    """
-    if not keep_aspect_ratio or image is None:
-        return width, height
+    Compute final canvas (width, height) from aspect_ratio + megapixels settings.
 
-    longest = max(width, height)
+    "As Reference" → derive ratio from ref_image (falls back to Custom if no image).
+    "Custom"       → use custom_width/custom_height, clamped to megapixel budget.
+    Otherwise      → scale the named ratio to the MP target.
+    """
+    target_pixels = _MEGAPIXEL_OPTIONS[megapixels]
+
+    if aspect_ratio == "As Reference":
+        if ref_image is not None:
+            return _scale_to_megapixels(ref_image.shape[2], ref_image.shape[1], target_pixels)
+        return _clamp_to_megapixel(custom_width, custom_height, target_pixels)
+
+    if aspect_ratio == "Custom":
+        return _clamp_to_megapixel(custom_width, custom_height, target_pixels)
+
+    w_parts, h_parts = _ASPECT_RATIO_OPTIONS[aspect_ratio]
+    w = math.sqrt(target_pixels * w_parts / h_parts)
+    h = math.sqrt(target_pixels * h_parts / w_parts)
+    return _round8(int(w)), _round8(int(h))
+
+
+def _resolve_resolution_from_image(
+    image: torch.Tensor,
+    megapixels: str,
+) -> Tuple[int, int]:
+    """Derive canvas from ref_0's native aspect ratio scaled to the megapixel budget."""
+    target_pixels = _MEGAPIXEL_OPTIONS[megapixels]
     src_h, src_w = image.shape[1], image.shape[2]
-    if src_w >= src_h:
-        return _round8(longest), _round8(int(longest * src_h / src_w))
-    else:
-        return _round8(int(longest * src_w / src_h)), _round8(longest)
+    return _scale_to_megapixels(src_w, src_h, target_pixels)
 
 
 def _center_crop_to_ratio(image: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
@@ -141,7 +195,7 @@ def _crop_by_mask(
     image: torch.Tensor,
     mask: Optional[torch.Tensor],
     padding: int,
-    longest_side: int,
+    target_pixels: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int, int], Tuple[int, int]]:
     b, oh, ow, _ = image.shape
 
@@ -159,9 +213,7 @@ def _crop_by_mask(
     y2 = min(oh, y2 + padding)
 
     crop_w, crop_h = x2 - x1, y2 - y1
-    scale = longest_side / max(crop_w, crop_h)
-    new_w = _round8(int(crop_w * scale))
-    new_h = _round8(int(crop_h * scale))
+    new_w, new_h = _scale_to_megapixels(crop_w, crop_h, target_pixels)
 
     cropped = _resize(image[:, y1:y2, x1:x2, :], new_w, new_h)
     cm = _resize_mask(full_mask[:, y1:y2, x1:x2], new_w, new_h)

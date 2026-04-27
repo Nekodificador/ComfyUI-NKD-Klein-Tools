@@ -13,7 +13,12 @@ from .helpers import (
     _resolve_resolution,
     _clamp_to_megapixel,
     _center_crop_to_ratio,
+    _ASPECT_RATIO_OPTIONS,
+    _MEGAPIXEL_OPTIONS,
 )
+
+_ASPECT_RATIO_KEYS = list(_ASPECT_RATIO_OPTIONS.keys())
+_MEGAPIXEL_KEYS    = list(_MEGAPIXEL_OPTIONS.keys())
 
 
 class NKDKleinPresampling(io.ComfyNode):
@@ -32,6 +37,7 @@ class NKDKleinPresampling(io.ComfyNode):
                 "between this node and NKDKleinPostsampling."
             ),
             inputs=[
+                io.Model.Input("model", tooltip="Flux Klein model — DifferentialDiffusion is applied internally when a mask is connected"),
                 io.Clip.Input("clip", tooltip="CLIP encoder from the Flux Klein loader"),
                 io.Vae.Input("vae",  tooltip="VAE from the Flux Klein loader"),
 
@@ -40,26 +46,30 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.String.Input("negative", default="", multiline=True,
                     tooltip="Negative prompt"),
 
-                io.Int.Input("width",  default=1024, min=64, max=8192, step=8,
+                # ---- resolution ----
+                io.Combo.Input("aspect_ratio",
+                    options=_ASPECT_RATIO_KEYS,
+                    default="1:1",
                     tooltip=(
-                        "Target width. When Keep Aspect Ratio is ON, the longer of "
-                        "width/height sets the longest side and the other is derived "
-                        "from ref_0's aspect ratio."
-                    )),
-                io.Int.Input("height", default=1024, min=64, max=8192, step=8,
-                    tooltip=(
-                        "Target height. When Keep Aspect Ratio is ON, the longer of "
-                        "width/height sets the longest side and the other is derived "
-                        "from ref_0's aspect ratio."
-                    )),
-                io.Boolean.Input("keep_aspect_ratio", default=True,
-                    tooltip=(
-                        "ON: derives the canvas resolution from ref_0's aspect ratio. "
-                        "The longer of width/height is the target longest side. "
-                        "OFF: uses width and height exactly."
+                        "Canvas aspect ratio. "
+                        "'As Reference' derives the ratio from ref_0 at the chosen MP budget. "
+                        "'Custom' enables manual width/height inputs. "
+                        "In inpainting mode the ratio is always derived from ref_0."
                     ),
-                    display_name="Keep Aspect Ratio"),
+                    display_name="Aspect Ratio"),
+                io.Combo.Input("megapixels",
+                    options=_MEGAPIXEL_KEYS,
+                    default="1 MP",
+                    tooltip="Total pixel budget for the canvas. Higher values produce larger outputs.",
+                    display_name="Megapixels"),
+                io.Int.Input("custom_width",  default=1024, min=64, max=8192, step=8,
+                    tooltip="Used only when Aspect Ratio is set to Custom",
+                    display_name="Custom Width"),
+                io.Int.Input("custom_height", default=1024, min=64, max=8192, step=8,
+                    tooltip="Used only when Aspect Ratio is set to Custom",
+                    display_name="Custom Height"),
 
+                # ---- reference images (autogrow) ----
                 io.Autogrow.Input(
                     "ref_images",
                     template=io.Autogrow.TemplatePrefix(
@@ -76,6 +86,7 @@ class NKDKleinPresampling(io.ComfyNode):
                     tooltip="Connect ref_0 for img2img/inpainting. Additional slots appear automatically.",
                 ),
 
+                # ---- mask ----
                 io.Mask.Input("mask", optional=True,
                     tooltip=(
                         "Inpaint mask — white = regenerate. "
@@ -88,21 +99,28 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Int.Input("mask_blur", default=40, min=0, max=512,
                     tooltip="Blur mask edges after growing",
                     display_name="Mask Blur"),
+                io.Float.Input("inpaint_blend", default=1.0, min=0.0, max=1.0, step=0.01,
+                    tooltip=(
+                        "Controls the transition between the inpainted region and the original image. "
+                        "1.0 = sharp binary transition driven by the mask. "
+                        "Lower values blend the mask gradient into the transition for softer edges."
+                    ),
+                    display_name="Inpaint Blend"),
 
+                # ---- detailing ----
                 io.Boolean.Input("use_detailing", default=False,
                     tooltip=(
                         "Crops and upscales the masked region before sampling. "
+                        "The crop is scaled to the same MP budget as the canvas. "
                         "NKDKleinPostsampling recomposes the result. Requires ref_0 and mask."
                     ),
                     display_name="Use Detailing"),
                 io.Int.Input("detail_padding", default=32, min=0, max=512,
                     tooltip="Padding (px) around the mask bounding box",
                     display_name="Detail Padding"),
-                io.Int.Input("detail_longest_side", default=1024, min=128, max=4096, step=8,
-                    tooltip="Longest side of the scaled crop in pixels (multiple of 8)",
-                    display_name="Detail Longest Side"),
             ],
             outputs=[
+                io.Model.Output("model"),
                 io.Conditioning.Output("positive", display_name="positive"),
                 io.Conditioning.Output("negative", display_name="negative"),
                 io.Latent.Output("latent"),
@@ -113,20 +131,22 @@ class NKDKleinPresampling(io.ComfyNode):
     @classmethod
     def execute(
         cls,
+        model,
         clip,
         vae,
         positive: str,
         negative: str,
-        width: int,
-        height: int,
-        keep_aspect_ratio: bool,
+        aspect_ratio: str,
+        megapixels: str,
+        custom_width: int,
+        custom_height: int,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
         mask_expand: int = 10,
         mask_blur: int = 40,
+        inpaint_blend: float = 1.0,
         use_detailing: bool = False,
         detail_padding: int = 32,
-        detail_longest_side: int = 1024,
     ) -> io.NodeOutput:
 
         # 0. Encode prompts
@@ -147,11 +167,17 @@ class NKDKleinPresampling(io.ComfyNode):
             mode = "t2i"
 
         # 2. Resolve canvas resolution
-        # Inpainting always derives ratio from the image (VAEEncode must match dimensions).
-        # keep_aspect_ratio=OFF + img2img → empty latent, so exact user values are fine.
-        if mode == "inpainting" or keep_aspect_ratio:
-            width, height = _resolve_resolution(ref_0, width, height, keep_aspect_ratio=True)
-        width, height = _clamp_to_megapixel(width, height)
+        # Inpainting always derives ratio from ref_0 to match VAEEncode dimensions.
+        # For all other modes, use the aspect_ratio combo (which may also read ref_0
+        # when set to "As Reference").
+        if mode == "inpainting" and has_image:
+            width, height = _resolve_resolution(
+                "As Reference", megapixels, custom_width, custom_height, ref_image=ref_0
+            )
+        else:
+            width, height = _resolve_resolution(
+                aspect_ratio, megapixels, custom_width, custom_height, ref_image=ref_0
+            )
 
         # 3. Canvas-sized image (for VAEEncode / mask alignment / crop background)
         image_resized = _resize(ref_0, width, height) if has_image else None
@@ -166,22 +192,34 @@ class NKDKleinPresampling(io.ComfyNode):
         crop_img = crop_m = crop_box = orig_size = None
         if use_detailing and has_image:
             crop_img, crop_m, crop_box, orig_size = _crop_by_mask(
-                image_resized, processed_mask, detail_padding, detail_longest_side
+                image_resized, processed_mask, detail_padding,
+                _MEGAPIXEL_OPTIONS[megapixels],
             )
 
-        # 6. ReferenceLatent — each ref center-cropped to canvas ratio then clamped to 1MP
-        def _ref_native(img: torch.Tensor) -> torch.Tensor:
-            img = _center_crop_to_ratio(img, width, height)
+        # 6. ReferenceLatent — each ref center-cropped to canvas ratio then clamped to MP budget.
+        def _clamp_only(img: torch.Tensor) -> torch.Tensor:
             rw, rh = _clamp_to_megapixel(img.shape[2], img.shape[1])
             return _resize(img, rw, rh)
 
-        ref_0_for_cond = crop_img if crop_img is not None else ref_0
-        if ref_0_for_cond is not None:
-            r = _ref_native(ref_0_for_cond)
+        def _crop_and_clamp(img: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
+            img = _center_crop_to_ratio(img, target_w, target_h)
+            return _clamp_only(img)
+
+        if crop_img is not None:
+            # Detailing crop already has the correct region ratio — clamp only
+            r = _clamp_only(crop_img)
+            pos = _apply_reference_latent(pos, r, vae)
+            neg = _apply_reference_latent(neg, r, vae)
+        elif ref_0 is not None:
+            if mode == "inpainting":
+                # In inpainting the canvas derives from ref_0's own ratio — no center-crop needed
+                r = _clamp_only(ref_0)
+            else:
+                r = _crop_and_clamp(ref_0, width, height)
             pos = _apply_reference_latent(pos, r, vae)
             neg = _apply_reference_latent(neg, r, vae)
         for ref in refs[1:]:
-            r = _ref_native(ref)
+            r = _crop_and_clamp(ref, width, height)
             pos = _apply_reference_latent(pos, r, vae)
             neg = _apply_reference_latent(neg, r, vae)
 
@@ -199,13 +237,34 @@ class NKDKleinPresampling(io.ComfyNode):
             nm = _resize_mask(processed_mask, encoded.shape[3], encoded.shape[2])
             latent = {"samples": encoded, "noise_mask": nm}
 
-        elif mode == "img2img" and keep_aspect_ratio:
+        elif mode == "img2img":
             latent = {"samples": vae.encode(image_resized[:, :, :, :3])}
 
-        else:  # t2i or img2img+keep_ar OFF
+        else:  # t2i
             latent = _make_empty_latent(width, height)
 
-        # 8. Build bundle
+        # 8. Apply DifferentialDiffusion when inpainting (mask present)
+        model = model.clone()
+        if has_mask:
+            blend = inpaint_blend
+            def _diff_diffusion(sigma, denoise_mask, extra_options):
+                m = extra_options["model"]
+                step_sigmas = extra_options["sigmas"]
+                sigma_to = m.inner_model.model_sampling.sigma_min
+                if step_sigmas[-1] > sigma_to:
+                    sigma_to = step_sigmas[-1]
+                sigma_from = step_sigmas[0]
+                ts_from = m.inner_model.model_sampling.timestep(sigma_from)
+                ts_to   = m.inner_model.model_sampling.timestep(sigma_to)
+                current_ts = m.inner_model.model_sampling.timestep(sigma[0])
+                threshold = (current_ts - ts_to) / (ts_from - ts_to)
+                binary_mask = (denoise_mask >= threshold).to(denoise_mask.dtype)
+                if blend < 1.0:
+                    return blend * binary_mask + (1.0 - blend) * denoise_mask
+                return binary_mask
+            model.set_model_denoise_mask_function(_diff_diffusion)
+
+        # 9. Build bundle
         bundle = KleinBundle(
             target_width=width,
             target_height=height,
@@ -219,7 +278,7 @@ class NKDKleinPresampling(io.ComfyNode):
             crop_original_size=orig_size,
         )
 
-        return io.NodeOutput(pos, neg, latent, bundle)
+        return io.NodeOutput(model, pos, neg, latent, bundle)
 
 
 def _make_empty_latent(width: int, height: int) -> dict:
