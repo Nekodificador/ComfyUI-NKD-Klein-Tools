@@ -292,27 +292,12 @@ def _uncrop(
 # ReferenceLatent
 # ---------------------------------------------------------------------------
 
-_KONTEXT_RESOLUTIONS = [
-    (672, 1568), (688, 1504), (720, 1456), (752, 1392), (800, 1328),
-    (832, 1248), (880, 1184), (944, 1104), (1024, 1024),
-    (1104, 944), (1184, 880), (1248, 832), (1328, 800),
-    (1392, 752), (1456, 720), (1504, 688), (1568, 672),
-]
-
-
-def _scale_to_kontext(image: torch.Tensor) -> torch.Tensor:
-    """Scale image to the nearest Kontext-preferred resolution, preserving aspect ratio with center crop."""
-    import comfy.utils
-    w, h = image.shape[2], image.shape[1]
-    ar = w / h
-    _, tw, th = min((abs(ar - rw / rh), rw, rh) for rw, rh in _KONTEXT_RESOLUTIONS)
-    return comfy.utils.common_upscale(image.movedim(-1, 1), tw, th, "lanczos", "center").movedim(1, -1)
-
-
 def _apply_reference_latent(conditioning: list, ref_image: torch.Tensor, vae) -> list:
     import node_helpers
-    scaled = _scale_to_kontext(ref_image)
-    ref_latent = vae.encode(scaled[:, :, :, :3])
+    # Clamp to 1MP so the VAE doesn't OOM on large inputs, preserving the native aspect ratio.
+    rw, rh = _clamp_to_megapixel(ref_image.shape[2], ref_image.shape[1])
+    img = _resize(ref_image, rw, rh)
+    ref_latent = vae.encode(img[:, :, :, :3])
     return node_helpers.conditioning_set_values(
         conditioning,
         {"reference_latents": [ref_latent]},
