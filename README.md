@@ -2,6 +2,9 @@
 
 Two ComfyUI nodes that wrap the Flux Klein pipeline into a simple pre/post pair. Connect your images, write your prompt, and run — all the internal Klein machinery is handled automatically.
 
+<img width="2219" height="1001" alt="image" src="https://github.com/user-attachments/assets/70a51042-42a9-40f8-8e2e-4230feeba097" />
+
+
 ---
 
 ## Nodes
