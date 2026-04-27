@@ -269,11 +269,9 @@ class NKDKleinPresampling(io.ComfyNode):
         else:  # t2i
             latent = _make_empty_latent(width, height)
 
-        # 8. Apply DifferentialDiffusion when inpainting (mask present) but NOT during
-        # detailing — the detailing sampler runs as a clean img2img over the crop; the
-        # Postsampling node handles compositing back onto the original.
+        # 8. Apply DifferentialDiffusion when a mask is present (inpainting or detailing).
         model = model.clone()
-        if has_mask and not use_detailing:
+        if has_mask:
             blend = inpaint_blend
             def _diff_diffusion(sigma, denoise_mask, extra_options):
                 m = extra_options["model"]
