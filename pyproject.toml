@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-nkd-klein-tools"
-version = "1.3.0"
+version = "1.4.0"
 description = "NKD Klein Presampling and Postsampling nodes for Flux Klein workflows in ComfyUI — includes inpainting, img2img, detailing crop, DifferentialDiffusion, ReferenceLatent, aspect ratio presets with anchor-aware center-crop, and megapixel budget system"
 license = "MIT"
 requires-python = ">=3.10"
