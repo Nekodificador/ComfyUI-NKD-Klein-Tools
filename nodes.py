@@ -105,6 +105,15 @@ class NKDKleinPresampling(io.ComfyNode):
                     ),
                     display_name="Inpaint Blend"),
 
+                # ---- mode overrides ----
+                io.Boolean.Input("bypass_reference", default=False,
+                    tooltip=(
+                        "Skip all ReferenceLatent injection and run as a standard img2img / "
+                        "inpainting model. Useful when you want the model to work without "
+                        "Klein's reference guidance."
+                    ),
+                    display_name="Bypass Reference"),
+
                 # ---- detailing ----
                 io.Boolean.Input("use_detailing", default=False,
                     tooltip=(
@@ -127,6 +136,20 @@ class NKDKleinPresampling(io.ComfyNode):
         )
 
     @classmethod
+    def is_changed(cls, mask=None, ref_images=None, **kwargs):
+        # Hash the mask and ref image tensors so ComfyUI detects content changes
+        # even when the upstream node filename hasn't changed (e.g. Load Image repaint).
+        import hashlib
+        h = hashlib.md5()
+        if mask is not None:
+            h.update(mask.cpu().numpy().tobytes())
+        if ref_images is not None:
+            for img in ref_images.values():
+                if img is not None:
+                    h.update(img.cpu().numpy().tobytes())
+        return h.hexdigest()
+
+    @classmethod
     def execute(
         cls,
         model,
@@ -143,6 +166,7 @@ class NKDKleinPresampling(io.ComfyNode):
         mask_expand: int = 40,
         mask_blur: int = 10,
         inpaint_blend: float = 0.75,
+        bypass_reference: bool = False,
         use_detailing: bool = False,
         detail_padding: int = 100,
     ) -> io.NodeOutput:
@@ -210,19 +234,18 @@ class NKDKleinPresampling(io.ComfyNode):
             )
             orig_size = (native_h, native_w)
 
-        # 6. ReferenceLatent — each ref center-cropped to canvas ratio then clamped to MP budget.
-        # ReferenceLatent — _apply_reference_latent scales each image internally to the
-        # nearest Kontext-preferred resolution (same logic as FluxKontextImageScale),
-        # preserving the source aspect ratio with a center crop. No manual resize needed.
-        if crop_img is not None:
-            pos = _apply_reference_latent(pos, crop_img, vae)
-            neg = _apply_reference_latent(neg, crop_img, vae)
-        elif ref_0 is not None:
-            pos = _apply_reference_latent(pos, ref_0, vae)
-            neg = _apply_reference_latent(neg, ref_0, vae)
-        for ref in refs[1:]:
-            pos = _apply_reference_latent(pos, ref, vae)
-            neg = _apply_reference_latent(neg, ref, vae)
+        # 6. ReferenceLatent — skipped entirely when bypass_reference is True so the
+        # model runs as a standard img2img/inpainting without Klein reference guidance.
+        if not bypass_reference:
+            if crop_img is not None:
+                pos = _apply_reference_latent(pos, crop_img, vae)
+                neg = _apply_reference_latent(neg, crop_img, vae)
+            elif ref_0 is not None:
+                pos = _apply_reference_latent(pos, ref_0, vae)
+                neg = _apply_reference_latent(neg, ref_0, vae)
+            for ref in refs[1:]:
+                pos = _apply_reference_latent(pos, ref, vae)
+                neg = _apply_reference_latent(neg, ref, vae)
 
         # 7. Build latent
         if use_detailing and crop_img is not None:
