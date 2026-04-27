@@ -91,13 +91,13 @@ class NKDKleinPresampling(io.ComfyNode):
                         "Activates inpainting mode and drives the detailing crop region."
                     )),
 
-                io.Int.Input("mask_expand", default=10, min=0, max=512,
+                io.Int.Input("mask_expand", default=40, min=0, max=512,
                     tooltip="Grow mask by this many pixels before encoding",
                     display_name="Mask Expand"),
-                io.Int.Input("mask_blur", default=40, min=0, max=512,
+                io.Int.Input("mask_blur", default=10, min=0, max=512,
                     tooltip="Blur mask edges after growing",
                     display_name="Mask Blur"),
-                io.Float.Input("inpaint_blend", default=1.0, min=0.0, max=1.0, step=0.01,
+                io.Float.Input("inpaint_blend", default=0.75, min=0.0, max=1.0, step=0.01,
                     tooltip=(
                         "Controls the transition between the inpainted region and the original image. "
                         "1.0 = sharp binary transition driven by the mask. "
@@ -113,7 +113,7 @@ class NKDKleinPresampling(io.ComfyNode):
                         "NKDKleinPostsampling recomposes the result. Requires ref_0 and mask."
                     ),
                     display_name="Use Detailing"),
-                io.Int.Input("detail_padding", default=32, min=0, max=512,
+                io.Int.Input("detail_padding", default=100, min=0, max=512,
                     tooltip="Padding (px) around the mask bounding box",
                     display_name="Detail Padding"),
             ],
@@ -140,11 +140,11 @@ class NKDKleinPresampling(io.ComfyNode):
         custom_height: int,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
-        mask_expand: int = 10,
-        mask_blur: int = 40,
-        inpaint_blend: float = 1.0,
+        mask_expand: int = 40,
+        mask_blur: int = 10,
+        inpaint_blend: float = 0.75,
         use_detailing: bool = False,
-        detail_padding: int = 32,
+        detail_padding: int = 100,
     ) -> io.NodeOutput:
 
         # 0. Encode prompts
