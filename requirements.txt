@@ -1,0 +1,1 @@
+# All dependencies (torch, comfy_api) are provided by ComfyUI itself.

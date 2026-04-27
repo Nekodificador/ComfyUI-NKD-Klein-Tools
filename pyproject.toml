@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-nkd-klein-tools"
+version = "1.0.0"
+description = "NKD Klein Presampling and Postsampling nodes for Flux Klein workflows in ComfyUI"
+license = "MIT"
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/Nekodificador/ComfyUI-NKD-Klein-Tools"
+
+[tool.comfy]
+PublisherId = "Nekodificador"
+DisplayName = "NKD Klein Tools"
+Icon = ""
