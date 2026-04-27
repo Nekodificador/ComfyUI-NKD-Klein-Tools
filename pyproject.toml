@@ -1,14 +1,18 @@
+[build-system]
+requires = ["flit_core>=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
 [project]
 name = "comfyui-nkd-klein-tools"
-version = "1.4.1"
-description = "NKD Klein Presampling and Postsampling nodes for Flux Klein workflows in ComfyUI — includes inpainting, img2img, detailing crop, DifferentialDiffusion, ReferenceLatent, aspect ratio presets with anchor-aware center-crop, and megapixel budget system"
-license = "MIT"
+version = "1.4.2"
+description = "NKD Klein Presampling and Postsampling nodes for Flux Klein workflows in ComfyUI"
+license = { text = "MIT" }
 requires-python = ">=3.10"
+dependencies = []
 
 [project.urls]
 Repository = "https://github.com/Nekodificador/ComfyUI-NKD-Klein-Tools"
 
 [tool.comfy]
-PublisherId = "Nekodificador"
+PublisherId = "nekodificador"
 DisplayName = "NKD Klein Tools"
-Icon = ""
