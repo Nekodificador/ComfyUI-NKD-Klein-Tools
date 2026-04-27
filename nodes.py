@@ -49,7 +49,7 @@ class NKDKleinPresampling(io.ComfyNode):
                 # ---- resolution ----
                 io.Combo.Input("aspect_ratio",
                     options=_ASPECT_RATIO_KEYS,
-                    default="1:1",
+                    default="As Reference",
                     tooltip=(
                         "Canvas aspect ratio. "
                         "'As Reference' derives the ratio from ref_0 at the chosen MP budget. "
@@ -62,6 +62,15 @@ class NKDKleinPresampling(io.ComfyNode):
                     default="1 MP",
                     tooltip="Total pixel budget for the canvas. Higher values produce larger outputs.",
                     display_name="Megapixels"),
+                io.Combo.Input("crop_anchor",
+                    options=[
+                        "↖ Top Left", "↑ Top Center", "↗ Top Right",
+                        "← Middle Left", "· Middle Center", "→ Middle Right",
+                        "↙ Bottom Left", "↓ Bottom Center", "↘ Bottom Right",
+                    ],
+                    default="· Middle Center",
+                    tooltip="Anchor point for the center-crop when the image ratio differs from the canvas ratio.",
+                    display_name="Crop Anchor"),
                 io.Int.Input("custom_width",  default=1024, min=64, max=8192, step=8,
                     tooltip="Used only when Aspect Ratio is set to Custom",
                     display_name="Custom Width"),
@@ -138,6 +147,7 @@ class NKDKleinPresampling(io.ComfyNode):
         negative: str,
         aspect_ratio: str,
         megapixels: str,
+        crop_anchor: str,
         custom_width: int,
         custom_height: int,
         ref_images: io.Autogrow.Type,
@@ -202,7 +212,7 @@ class NKDKleinPresampling(io.ComfyNode):
             return _resize(img, rw, rh)
 
         def _crop_and_clamp(img: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
-            img = _center_crop_to_ratio(img, target_w, target_h)
+            img = _center_crop_to_ratio(img, target_w, target_h, crop_anchor)
             return _clamp_only(img)
 
         if crop_img is not None:

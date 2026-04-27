@@ -84,17 +84,31 @@ _MEGAPIXEL_OPTIONS = {
 
 # (w_parts, h_parts) for each named ratio — None means "derive from ref_0 or custom"
 _ASPECT_RATIO_OPTIONS = {
-    "As Reference": None,
-    "1:1":    (1, 1),
-    "4:3":    (4, 3),
-    "3:4":    (3, 4),
-    "16:9":   (16, 9),
-    "9:16":   (9, 16),
-    "3:2":    (3, 2),
-    "2:3":    (2, 3),
-    "21:9":   (21, 9),
-    "9:21":   (9, 21),
-    "Custom": None,
+    "As Reference":    None,
+    "1:1":             (1, 1),
+    "2:3 Vertical":    (2, 3),
+    "3:4 Vertical":    (3, 4),
+    "3:5 Vertical":    (3, 5),
+    "4:5 Vertical":    (4, 5),
+    "5:7 Vertical":    (5, 7),
+    "5:8 Vertical":    (5, 8),
+    "7:9 Vertical":    (7, 9),
+    "9:16 Vertical":   (9, 16),
+    "9:19 Vertical":   (9, 19),
+    "9:21 Vertical":   (9, 21),
+    "9:32 Vertical":   (9, 32),
+    "3:2 Horizontal":  (3, 2),
+    "4:3 Horizontal":  (4, 3),
+    "5:3 Horizontal":  (5, 3),
+    "5:4 Horizontal":  (5, 4),
+    "7:5 Horizontal":  (7, 5),
+    "8:5 Horizontal":  (8, 5),
+    "9:7 Horizontal":  (9, 7),
+    "16:9 Horizontal": (16, 9),
+    "19:9 Horizontal": (19, 9),
+    "21:9 Horizontal": (21, 9),
+    "32:9 Horizontal": (32, 9),
+    "Custom":          None,
 }
 
 
@@ -154,8 +168,13 @@ def _resolve_resolution_from_image(
     return _scale_to_megapixels(src_w, src_h, target_pixels)
 
 
-def _center_crop_to_ratio(image: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
-    """Center-crop [B,H,W,C] so its aspect ratio matches target_w/target_h. Never upscales."""
+def _center_crop_to_ratio(
+    image: torch.Tensor,
+    target_w: int,
+    target_h: int,
+    anchor: str = "· Middle Center",
+) -> torch.Tensor:
+    """Crop [B,H,W,C] so its aspect ratio matches target_w/target_h using the given anchor point."""
     _, h, w, _ = image.shape
     target_ratio = target_w / target_h
     src_ratio = w / h
@@ -163,13 +182,33 @@ def _center_crop_to_ratio(image: torch.Tensor, target_w: int, target_h: int) -> 
     if abs(src_ratio - target_ratio) < 1e-4:
         return image
 
+    # Decode anchor: vertical = top/middle/bottom, horizontal = left/center/right
+    anchor_lo = anchor.lower()
+    if "top" in anchor_lo:
+        vy = 0.0
+    elif "bottom" in anchor_lo:
+        vy = 1.0
+    else:
+        vy = 0.5
+
+    if "left" in anchor_lo:
+        vx = 0.0
+    elif "right" in anchor_lo:
+        vx = 1.0
+    else:
+        vx = 0.5
+
     if src_ratio > target_ratio:
+        # image wider than target — crop width
         new_w = int(round(h * target_ratio))
-        x0 = (w - new_w) // 2
+        x0 = int(round((w - new_w) * vx))
+        x0 = max(0, min(w - new_w, x0))
         return image[:, :, x0:x0 + new_w, :]
     else:
+        # image taller than target — crop height
         new_h = int(round(w / target_ratio))
-        y0 = (h - new_h) // 2
+        y0 = int(round((h - new_h) * vy))
+        y0 = max(0, min(h - new_h, y0))
         return image[:, y0:y0 + new_h, :, :]
 
 
