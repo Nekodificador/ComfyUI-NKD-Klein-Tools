@@ -11,7 +11,6 @@ from .helpers import (
     _uncrop,
     _apply_reference_latent,
     _resolve_resolution,
-    _clamp_to_megapixel,
     _ASPECT_RATIO_OPTIONS,
     _MEGAPIXEL_OPTIONS,
 )
@@ -222,33 +221,18 @@ class NKDKleinPresampling(io.ComfyNode):
             orig_size = (native_h, native_w)
 
         # 6. ReferenceLatent — each ref center-cropped to canvas ratio then clamped to MP budget.
-        def _clamp_only(img: torch.Tensor) -> torch.Tensor:
-            rw, rh = _clamp_to_megapixel(img.shape[2], img.shape[1])
-            return _resize(img, rw, rh)
-
-        def _crop_and_clamp(img: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
-            # Direct resize to canvas dimensions — Klein understands context regardless of stretch.
-            # Crop/letterbox approaches lose information; a simple resize preserves everything.
-            scaled = _resize(img, target_w, target_h)
-            return _clamp_only(scaled)
-
+        # ReferenceLatent — _apply_reference_latent scales each image internally to the
+        # nearest Kontext-preferred resolution (same logic as FluxKontextImageScale),
+        # preserving the source aspect ratio with a center crop. No manual resize needed.
         if crop_img is not None:
-            # Detailing crop already has the correct region ratio — clamp only
-            r = _clamp_only(crop_img)
-            pos = _apply_reference_latent(pos, r, vae)
-            neg = _apply_reference_latent(neg, r, vae)
+            pos = _apply_reference_latent(pos, crop_img, vae)
+            neg = _apply_reference_latent(neg, crop_img, vae)
         elif ref_0 is not None:
-            if mode == "inpainting":
-                # In inpainting the canvas derives from ref_0's own ratio — no center-crop needed
-                r = _clamp_only(ref_0)
-            else:
-                r = _crop_and_clamp(ref_0, width, height)
-            pos = _apply_reference_latent(pos, r, vae)
-            neg = _apply_reference_latent(neg, r, vae)
+            pos = _apply_reference_latent(pos, ref_0, vae)
+            neg = _apply_reference_latent(neg, ref_0, vae)
         for ref in refs[1:]:
-            r = _crop_and_clamp(ref, width, height)
-            pos = _apply_reference_latent(pos, r, vae)
-            neg = _apply_reference_latent(neg, r, vae)
+            pos = _apply_reference_latent(pos, ref, vae)
+            neg = _apply_reference_latent(neg, ref, vae)
 
         # 7. Build latent
         if use_detailing and crop_img is not None:
