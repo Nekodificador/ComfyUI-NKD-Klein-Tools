@@ -212,45 +212,6 @@ def _center_crop_to_ratio(
         return image[:, y0:y0 + new_h, :, :]
 
 
-def _letterbox_to_ratio(
-    image: torch.Tensor,
-    target_w: int,
-    target_h: int,
-) -> torch.Tensor:
-    """Scale [B,H,W,C] to fit entirely within target_w/target_h ratio, padding with black."""
-    _, h, w, _ = image.shape
-    target_ratio = target_w / target_h
-    src_ratio = w / h
-
-    if abs(src_ratio - target_ratio) < 1e-4:
-        return image
-
-    if src_ratio > target_ratio:
-        # image wider — fit width, pad height
-        new_w = target_w
-        new_h = _round8(int(round(target_w / src_ratio)))
-        scaled = _resize(image, new_w, new_h)
-        pad_total = _round8(int(round(target_w / target_ratio))) - new_h
-        pad_top = pad_total // 2
-        pad_bot = pad_total - pad_top
-        b, _, _, c = scaled.shape
-        top = torch.zeros(b, pad_top, new_w, c, device=image.device, dtype=image.dtype)
-        bot = torch.zeros(b, pad_bot, new_w, c, device=image.device, dtype=image.dtype)
-        return torch.cat([top, scaled, bot], dim=1)
-    else:
-        # image taller — fit height, pad width
-        new_h = target_h
-        new_w = _round8(int(round(target_h * src_ratio)))
-        scaled = _resize(image, new_w, new_h)
-        pad_total = _round8(int(round(target_h * target_ratio))) - new_w
-        pad_left = pad_total // 2
-        pad_right = pad_total - pad_left
-        b, _, _, c = scaled.shape
-        left  = torch.zeros(b, new_h, pad_left,  c, device=image.device, dtype=image.dtype)
-        right = torch.zeros(b, new_h, pad_right, c, device=image.device, dtype=image.dtype)
-        return torch.cat([left, scaled, right], dim=2)
-
-
 # ---------------------------------------------------------------------------
 # Crop / uncrop
 # ---------------------------------------------------------------------------

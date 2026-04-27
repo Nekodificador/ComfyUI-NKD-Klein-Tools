@@ -12,7 +12,6 @@ from .helpers import (
     _apply_reference_latent,
     _resolve_resolution,
     _clamp_to_megapixel,
-    _letterbox_to_ratio,
     _ASPECT_RATIO_OPTIONS,
     _MEGAPIXEL_OPTIONS,
 )
@@ -228,8 +227,10 @@ class NKDKleinPresampling(io.ComfyNode):
             return _resize(img, rw, rh)
 
         def _crop_and_clamp(img: torch.Tensor, target_w: int, target_h: int) -> torch.Tensor:
-            img = _letterbox_to_ratio(img, target_w, target_h)
-            return _clamp_only(img)
+            # Direct resize to canvas dimensions — Klein understands context regardless of stretch.
+            # Crop/letterbox approaches lose information; a simple resize preserves everything.
+            scaled = _resize(img, target_w, target_h)
+            return _clamp_only(scaled)
 
         if crop_img is not None:
             # Detailing crop already has the correct region ratio — clamp only
