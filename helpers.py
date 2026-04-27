@@ -168,50 +168,6 @@ def _resolve_resolution_from_image(
     return _scale_to_megapixels(src_w, src_h, target_pixels)
 
 
-def _center_crop_to_ratio(
-    image: torch.Tensor,
-    target_w: int,
-    target_h: int,
-    anchor: str = "· Middle Center",
-) -> torch.Tensor:
-    """Crop [B,H,W,C] so its aspect ratio matches target_w/target_h using the given anchor point."""
-    _, h, w, _ = image.shape
-    target_ratio = target_w / target_h
-    src_ratio = w / h
-
-    if abs(src_ratio - target_ratio) < 1e-4:
-        return image
-
-    # Decode anchor: vertical = top/middle/bottom, horizontal = left/center/right
-    anchor_lo = anchor.lower()
-    if "top" in anchor_lo:
-        vy = 0.0
-    elif "bottom" in anchor_lo:
-        vy = 1.0
-    else:
-        vy = 0.5
-
-    if "left" in anchor_lo:
-        vx = 0.0
-    elif "right" in anchor_lo:
-        vx = 1.0
-    else:
-        vx = 0.5
-
-    if src_ratio > target_ratio:
-        # image wider than target — crop width
-        new_w = int(round(h * target_ratio))
-        x0 = int(round((w - new_w) * vx))
-        x0 = max(0, min(w - new_w, x0))
-        return image[:, :, x0:x0 + new_w, :]
-    else:
-        # image taller than target — crop height
-        new_h = int(round(w / target_ratio))
-        y0 = int(round((h - new_h) * vy))
-        y0 = max(0, min(h - new_h, y0))
-        return image[:, y0:y0 + new_h, :, :]
-
-
 # ---------------------------------------------------------------------------
 # Crop / uncrop
 # ---------------------------------------------------------------------------
