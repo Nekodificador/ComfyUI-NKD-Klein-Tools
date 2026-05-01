@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "comfyui-nkd-klein-tools"
-version = "1.4.2"
+version = "1.4.3"
 description = "NKD Klein Presampling and Postsampling nodes for Flux Klein workflows in ComfyUI"
 license = { text = "MIT" }
 requires-python = ">=3.10"
