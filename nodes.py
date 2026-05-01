@@ -113,6 +113,13 @@ class NKDKleinPresampling(io.ComfyNode):
                         "Klein's reference guidance."
                     ),
                     display_name="Bypass Reference"),
+                io.Boolean.Input("pin_model", default=False,
+                    tooltip=(
+                        "Force the model to stay loaded in VRAM for the duration of this node. "
+                        "Reduces swap overhead when processing many tiles in sequence. "
+                        "Only enable if you have enough VRAM — will OOM instead of swapping."
+                    ),
+                    display_name="Pin Model"),
 
                 # ---- detailing ----
                 io.Boolean.Input("use_detailing", default=False,
@@ -136,17 +143,14 @@ class NKDKleinPresampling(io.ComfyNode):
         )
 
     @classmethod
-    def is_changed(cls, mask=None, ref_images=None, **kwargs):
-        # Hash the mask and ref image tensors so ComfyUI detects content changes
-        # even when the upstream node filename hasn't changed (e.g. Load Image repaint).
+    def is_changed(cls, mask=None, **kwargs):
+        # Only hash the mask — ref_images and prompts are handled by ComfyUI's
+        # normal upstream-change detection. Hashing ref_images here caused the
+        # node to re-execute on every tile even when only the mask changed.
         import hashlib
         h = hashlib.md5()
         if mask is not None:
             h.update(mask.cpu().numpy().tobytes())
-        if ref_images is not None:
-            for img in ref_images.values():
-                if img is not None:
-                    h.update(img.cpu().numpy().tobytes())
         return h.hexdigest()
 
     @classmethod
@@ -167,11 +171,17 @@ class NKDKleinPresampling(io.ComfyNode):
         mask_blur: int = 10,
         inpaint_blend: float = 0.75,
         bypass_reference: bool = False,
+        pin_model: bool = False,
         use_detailing: bool = False,
         detail_padding: int = 100,
     ) -> io.NodeOutput:
 
-        # 0. Encode prompts
+        # 0. Pin model in VRAM if requested
+        if pin_model:
+            from comfy import model_management
+            model_management.load_models_gpu([model])
+
+        # 1. Encode prompts
         pos = clip.encode_from_tokens_scheduled(clip.tokenize(positive))
         neg = clip.encode_from_tokens_scheduled(clip.tokenize(negative))
 
