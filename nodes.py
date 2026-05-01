@@ -178,7 +178,7 @@ class NKDKleinPresampling(io.ComfyNode):
         refs = [v for v in ref_images.values() if v is not None]
         ref_0 = refs[0] if refs else None
         has_image = ref_0 is not None
-        has_mask  = mask is not None
+        has_mask  = mask is not None and mask.max().item() > 0.0
 
         # 1. Detect mode
         if has_image and has_mask:
