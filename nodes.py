@@ -139,6 +139,8 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Conditioning.Output("negative", display_name="negative"),
                 io.Latent.Output("latent"),
                 NKDKleinBundleType.Output("bundle"),
+                io.Mask.Output("mask", display_name="mask",
+                    tooltip="Processed mask after grow and blur — connect to NKDTileMerge tile_masks for correct masked compositing."),
             ],
         )
 
@@ -339,7 +341,8 @@ class NKDKleinPresampling(io.ComfyNode):
             crop_original_size=orig_size,
         )
 
-        return io.NodeOutput(model, pos, neg, latent, bundle)
+        out_mask = processed_mask[0] if processed_mask is not None else torch.zeros(1, height, width, dtype=torch.float32)
+        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask)
 
 
 def _make_empty_latent(width: int, height: int) -> dict:
