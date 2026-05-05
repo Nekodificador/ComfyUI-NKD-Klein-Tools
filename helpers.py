@@ -85,6 +85,7 @@ _MEGAPIXEL_OPTIONS = {
 # (w_parts, h_parts) for each named ratio — None means "derive from ref_0 or custom"
 _ASPECT_RATIO_OPTIONS = {
     "As Reference":    None,
+    "Custom":          None,
     "1:1":             (1, 1),
     "2:3 Vertical":    (2, 3),
     "3:4 Vertical":    (3, 4),
@@ -108,7 +109,6 @@ _ASPECT_RATIO_OPTIONS = {
     "19:9 Horizontal": (19, 9),
     "21:9 Horizontal": (21, 9),
     "32:9 Horizontal": (32, 9),
-    "Custom":          None,
 }
 
 

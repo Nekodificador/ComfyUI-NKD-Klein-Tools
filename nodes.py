@@ -44,6 +44,10 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.String.Input("negative", default="", multiline=True,
                     tooltip="Negative prompt"),
 
+                io.Boolean.Input("pin_model", default=False,
+                    tooltip="Keep the model loaded in VRAM. Only enable if you have enough VRAM — will OOM instead of swapping.",
+                    display_name="Pin Model"),
+
                 # ---- resolution ----
                 io.Combo.Input("aspect_ratio",
                     options=_ASPECT_RATIO_KEYS,
@@ -66,6 +70,15 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Int.Input("custom_height", default=1024, min=64, max=8192, step=8,
                     tooltip="Used only when Aspect Ratio is set to Custom",
                     display_name="Custom Height"),
+
+                # ---- mode overrides ----
+                io.Boolean.Input("bypass_reference", default=False,
+                    tooltip=(
+                        "Skip all ReferenceLatent injection and run as a standard img2img / "
+                        "inpainting model. Useful when you want the model to work without "
+                        "Klein's reference guidance."
+                    ),
+                    display_name="Bypass Reference"),
 
                 # ---- reference images (autogrow) ----
                 io.Autogrow.Input(
@@ -91,35 +104,19 @@ class NKDKleinPresampling(io.ComfyNode):
                         "Activates inpainting mode and drives the detailing crop region."
                     )),
 
-                io.Int.Input("mask_expand", default=40, min=0, max=512,
+                io.Int.Input("mask_expand", default=20, min=0, max=512,
                     tooltip="Grow mask by this many pixels before encoding",
                     display_name="Mask Expand"),
                 io.Int.Input("mask_blur", default=10, min=0, max=512,
                     tooltip="Blur mask edges after growing",
                     display_name="Mask Blur"),
-                io.Float.Input("inpaint_blend", default=0.75, min=0.0, max=1.0, step=0.01,
+                io.Float.Input("inpaint_blend", default=1.0, min=0.0, max=1.0, step=0.01,
                     tooltip=(
                         "Controls the transition between the inpainted region and the original image. "
                         "1.0 = sharp binary transition driven by the mask. "
                         "Lower values blend the mask gradient into the transition for softer edges."
                     ),
                     display_name="Inpaint Blend"),
-
-                # ---- mode overrides ----
-                io.Boolean.Input("bypass_reference", default=False,
-                    tooltip=(
-                        "Skip all ReferenceLatent injection and run as a standard img2img / "
-                        "inpainting model. Useful when you want the model to work without "
-                        "Klein's reference guidance."
-                    ),
-                    display_name="Bypass Reference"),
-                io.Boolean.Input("pin_model", default=False,
-                    tooltip=(
-                        "Force the model to stay loaded in VRAM for the duration of this node. "
-                        "Reduces swap overhead when processing many tiles in sequence. "
-                        "Only enable if you have enough VRAM — will OOM instead of swapping."
-                    ),
-                    display_name="Pin Model"),
 
                 # ---- detailing ----
                 io.Boolean.Input("use_detailing", default=False,
@@ -129,7 +126,7 @@ class NKDKleinPresampling(io.ComfyNode):
                         "NKDKleinPostsampling recomposes the result. Requires ref_0 and mask."
                     ),
                     display_name="Use Detailing"),
-                io.Int.Input("detail_padding", default=100, min=0, max=512,
+                io.Int.Input("detail_padding", default=50, min=0, max=512,
                     tooltip="Padding (px) around the mask bounding box",
                     display_name="Detail Padding"),
             ],
@@ -169,13 +166,13 @@ class NKDKleinPresampling(io.ComfyNode):
         custom_height: int,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
-        mask_expand: int = 40,
+        mask_expand: int = 20,
         mask_blur: int = 10,
-        inpaint_blend: float = 0.75,
+        inpaint_blend: float = 1.0,
         bypass_reference: bool = False,
         pin_model: bool = False,
         use_detailing: bool = False,
-        detail_padding: int = 100,
+        detail_padding: int = 50,
     ) -> io.NodeOutput:
 
         # 0. Pin model in VRAM if requested
