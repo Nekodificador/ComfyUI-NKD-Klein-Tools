@@ -2,6 +2,8 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from .nodes import NKDKleinPresampling, NKDKleinPostsampling
 
+WEB_DIRECTORY = "./js"
+
 
 class NKDKleinNodesExtension(ComfyExtension):
     @override
@@ -24,4 +26,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NKDKleinPostsampling": "😺NKD Klein Postsampling",
 }
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
