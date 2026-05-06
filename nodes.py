@@ -92,7 +92,7 @@ class NKDKleinPresampling(io.ComfyNode):
                             )),
                         prefix="ref_",
                         min=1,
-                        max=4,
+                        max=8,
                     ),
                     tooltip="Connect ref_0 for img2img/inpainting. Additional slots appear automatically.",
                 ),
@@ -296,13 +296,20 @@ class NKDKleinPresampling(io.ComfyNode):
         # 9. Build bundle.
         # Detailing background is always ref_0 native — crop_box is already in native coords
         # and aligned to multiples of 8. Postsampling pastes the patch back at full source res.
+        # The native mask is rebuilt from the source mask directly (resize → grow → blur)
+        # rather than resampling processed_mask back from canvas. A canvas→native roundtrip
+        # is two bilinears with align_corners=False, which shifts edges sub-pixel and leaves
+        # non-zero alpha *outside* the original mask region — that's what shows up as the
+        # emboss ring around the patch in debug_difference.
         processed_mask_native = None
         bg_for_crop = None
         if crop_box is not None and ref_0 is not None:
             bg_for_crop = ref_0
             bg_h, bg_w = ref_0.shape[1], ref_0.shape[2]
-            if processed_mask is not None:
-                processed_mask_native = _resize_mask(processed_mask, bg_w, bg_h)
+            if has_mask:
+                m_native = mask if mask.dim() == 3 else mask.unsqueeze(0)
+                m_native = _resize_mask(m_native, bg_w, bg_h)
+                processed_mask_native = _mask_grow(m_native, mask_expand, mask_blur)
 
         bundle = KleinBundle(
             target_width=width,
