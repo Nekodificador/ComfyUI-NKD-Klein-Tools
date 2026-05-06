@@ -9,12 +9,30 @@ import torch.nn.functional as F
 # Image / mask resize
 # ---------------------------------------------------------------------------
 
-def _resize(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
+def _resize(image: torch.Tensor, width: int, height: int, mode: str = "bilinear") -> torch.Tensor:
     if image.shape[1] == height and image.shape[2] == width:
         return image
     x = image.permute(0, 3, 1, 2)
-    x = F.interpolate(x, size=(height, width), mode="bilinear", align_corners=False)
+    # `area` does not accept align_corners; bicubic/bilinear do.
+    if mode == "area":
+        x = F.interpolate(x, size=(height, width), mode="area")
+    else:
+        x = F.interpolate(x, size=(height, width), mode=mode, align_corners=False)
+    if mode == "bicubic":
+        x = x.clamp(0.0, 1.0)
     return x.permute(0, 2, 3, 1)
+
+
+def _resize_auto(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    """Pick the right filter based on direction: area for downscale, bicubic for upscale.
+    Within ±5% of identity, fall through to a no-op (handled by _resize's shape check)."""
+    if image.shape[1] == height and image.shape[2] == width:
+        return image
+    src_pixels = image.shape[1] * image.shape[2]
+    dst_pixels = height * width
+    if dst_pixels < src_pixels:
+        return _resize(image, width, height, mode="area")
+    return _resize(image, width, height, mode="bicubic")
 
 
 def _resize_mask(mask: torch.Tensor, width: int, height: int) -> torch.Tensor:
@@ -186,12 +204,70 @@ def _bbox_from_mask(mask: torch.Tensor) -> Tuple[int, int, int, int]:
     return x1, y1, x2, y2
 
 
+def _expand_bbox_to_multiple(
+    x1: int, y1: int, x2: int, y2: int,
+    img_w: int, img_h: int,
+    multiple: int = 8,
+) -> Tuple[int, int, int, int]:
+    """Grow bbox so width/height are multiples of `multiple`, centered when possible.
+    Falls back to shifting against the image edge if the grown bbox would clip out."""
+    def _grow(a: int, b: int, limit: int) -> Tuple[int, int]:
+        size = b - a
+        rem = size % multiple
+        if rem == 0:
+            return a, b
+        extra = multiple - rem
+        add_before = extra // 2
+        add_after = extra - add_before
+        new_a = a - add_before
+        new_b = b + add_after
+        if new_a < 0:
+            new_b += -new_a
+            new_a = 0
+        if new_b > limit:
+            new_a -= (new_b - limit)
+            new_b = limit
+        new_a = max(0, new_a)
+        # If the image itself is smaller than `multiple`, we can't satisfy this — caller decides.
+        return new_a, new_b
+
+    nx1, nx2 = _grow(x1, x2, img_w)
+    ny1, ny2 = _grow(y1, y2, img_h)
+    return nx1, ny1, nx2, ny2
+
+
+def _scale_to_megapixels_uniform(
+    width: int, height: int, target_pixels: int, multiple: int = 8,
+) -> Tuple[int, int]:
+    """Scale (w, h) to ~target_pixels with a SINGLE uniform factor on both axes,
+    then round each axis independently to `multiple`. The shared factor preserves
+    aspect ratio exactly; the rounding is at most `multiple-1` px per axis."""
+    scale = (target_pixels / (width * height)) ** 0.5
+    new_w = max(multiple, int(round(width * scale / multiple)) * multiple)
+    new_h = max(multiple, int(round(height * scale / multiple)) * multiple)
+    return new_w, new_h
+
+
 def _crop_by_mask(
     image: torch.Tensor,
     mask: Optional[torch.Tensor],
     padding: int,
     target_pixels: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int, int], Tuple[int, int]]:
+    """Crop image+mask around the mask bbox and resample to the MP budget.
+
+    Strategy:
+      1. Derive bbox in image-native coords and grow to a multiple of 8 (Flux VAE).
+      2. Crop directly from the source — no implicit resize.
+      3. If the bbox is within ±5% of the MP budget, return it as-is (fast path:
+         the patch will composite back 1:1 with no resize, no bevel).
+      4. Otherwise resample the crop to the budget with a SINGLE uniform factor
+         on both axes (preserves aspect exactly), using bicubic for upscale and
+         area filtering for downscale. This is what enables the detailer to act
+         as an upscaler when the user picks a higher MP budget.
+
+    crop_box always describes the patch's position in the source image; postsampling
+    resizes the decoded patch back to (crop_w, crop_h) when the resample happened."""
     b, oh, ow, _ = image.shape
 
     if mask is None:
@@ -207,12 +283,24 @@ def _crop_by_mask(
     x2 = min(ow, x2 + padding)
     y2 = min(oh, y2 + padding)
 
+    x1, y1, x2, y2 = _expand_bbox_to_multiple(x1, y1, x2, y2, ow, oh, multiple=8)
+
     crop_w, crop_h = x2 - x1, y2 - y1
-    new_w, new_h = _scale_to_megapixels(crop_w, crop_h, target_pixels)
+    cropped_raw = image[:, y1:y2, x1:x2, :]
+    mask_raw = full_mask[:, y1:y2, x1:x2]
 
-    cropped = _resize(image[:, y1:y2, x1:x2, :], new_w, new_h)
-    cm = _resize_mask(full_mask[:, y1:y2, x1:x2], new_w, new_h)
+    bbox_pixels = crop_w * crop_h
+    # Fast path: if the bbox is already within ±5% of the MP budget, skip the resize.
+    # Resampling by ~1.02× wastes detail (VAE roundtrip + bicubic) without buying
+    # meaningful resolution — and keeps the patch 1:1 with the source for compositing.
+    ratio = bbox_pixels / target_pixels
+    if 0.95 <= ratio <= 1.05:
+        return cropped_raw, mask_raw, (x1, y1, x2, y2), (oh, ow)
 
+    # Otherwise resample uniformly to the MP budget. Upscale → bicubic; downscale → area.
+    new_w, new_h = _scale_to_megapixels_uniform(crop_w, crop_h, target_pixels)
+    cropped = _resize_auto(cropped_raw, new_w, new_h)
+    cm = _resize_mask(mask_raw, new_w, new_h)
     return cropped, cm, (x1, y1, x2, y2), (oh, ow)
 
 
@@ -227,12 +315,27 @@ def _uncrop(
     x1, y1, x2, y2 = crop_box
     crop_h, crop_w = y2 - y1, x2 - x1
 
-    patch_resized = _resize(patch, crop_w, crop_h)
+    # Fast path: when the patch already matches the crop_box dimensions (presampling
+    # took the bbox 1:1 with no resample), skip the resize entirely. This is what
+    # eliminates the sub-pixel "bevel" on the composite — the patch's pixel grid is
+    # 1:1 with the source region.
+    if patch.shape[1] == crop_h and patch.shape[2] == crop_w:
+        patch_resized = patch
+    else:
+        # The bbox was resampled at presampling. Use direction-appropriate filtering:
+        # area for downscale (patch larger than bbox, e.g. detailer ran at higher MP),
+        # bicubic for upscale (patch smaller than bbox, bbox exceeded the MP budget).
+        patch_resized = _resize_auto(patch, crop_w, crop_h)
     bg = background.clone()
 
     if mask is not None:
         m = mask if mask.dim() == 3 else mask.unsqueeze(0)
-        region_mask = _resize_mask(m[:, y1:y2, x1:x2], crop_w, crop_h)
+        # The mask is already in background coords — slice directly and avoid a
+        # second resize. We only resize if the slice shape disagrees with the patch
+        # (defensive; should not happen with the floor/ceil crop_box rounding).
+        region_mask = m[:, y1:y2, x1:x2]
+        if region_mask.shape[1] != crop_h or region_mask.shape[2] != crop_w:
+            region_mask = _resize_mask(region_mask, crop_w, crop_h)
         if feather > 0:
             region_mask = _mask_grow(region_mask, 0, feather)
         alpha = region_mask.unsqueeze(-1)

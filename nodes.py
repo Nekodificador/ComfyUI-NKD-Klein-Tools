@@ -220,26 +220,22 @@ class NKDKleinPresampling(io.ComfyNode):
             processed_mask = _mask_grow(_resize_mask(m, width, height), mask_expand, mask_blur)
 
         # 5. Compute detailing crop before ReferenceLatent so the sampler sees the crop region.
-        # crop_box and orig_size are expressed in ref_0 native coordinates so that the
-        # Postsampling uncrop pastes back at full resolution, not at the down-scaled canvas.
+        # The crop is taken directly from ref_0 in its native pixel grid: no canvas→native
+        # remap, no asymmetric rounding, and the crop_box edges are already multiples of 8
+        # so the VAE consumes them without implicit padding. This keeps the patch's pixels
+        # 1:1 with the source region — Postsampling pastes back without any resize when the
+        # bbox fit the MP budget.
         crop_img = crop_m = crop_box = orig_size = None
         if use_detailing and has_image:
-            # Derive the crop box from the canvas-resolution mask, then map it back to
-            # the native ref_0 space by scaling with the ratio (native / canvas).
-            crop_img, crop_m, crop_box_canvas, _ = _crop_by_mask(
-                image_resized, processed_mask, detail_padding,
-                _MEGAPIXEL_OPTIONS[megapixels],
-            )
-            # Scale crop_box from canvas coords to ref_0 native coords
             native_h, native_w = ref_0.shape[1], ref_0.shape[2]
-            sx = native_w / width
-            sy = native_h / height
-            cx1, cy1, cx2, cy2 = crop_box_canvas
-            crop_box = (
-                max(0, int(round(cx1 * sx))),
-                max(0, int(round(cy1 * sy))),
-                min(native_w, int(round(cx2 * sx))),
-                min(native_h, int(round(cy2 * sy))),
+            # Build a native-resolution mask for the bbox computation.
+            if processed_mask is not None:
+                native_mask = _resize_mask(processed_mask, native_w, native_h)
+            else:
+                native_mask = None
+            crop_img, crop_m, crop_box, _ = _crop_by_mask(
+                ref_0, native_mask, detail_padding,
+                _MEGAPIXEL_OPTIONS[megapixels],
             )
             orig_size = (native_h, native_w)
 
@@ -298,29 +294,13 @@ class NKDKleinPresampling(io.ComfyNode):
             model.set_model_denoise_mask_function(_diff_diffusion)
 
         # 9. Build bundle.
-        # Choose the background for the detailing uncrop: whichever is larger between
-        # ref_0 native and image_resized (canvas). This handles both directions:
-        #   - ref_0 larger than canvas (e.g. 3000px input) → paste at native res
-        #   - ref_0 smaller than canvas (e.g. 512px input upscaled) → paste at canvas res
-        # crop_box and processed_mask_native are expressed in the chosen background's coords.
+        # Detailing background is always ref_0 native — crop_box is already in native coords
+        # and aligned to multiples of 8. Postsampling pastes the patch back at full source res.
         processed_mask_native = None
         bg_for_crop = None
         if crop_box is not None and ref_0 is not None:
-            native_pixels = ref_0.shape[1] * ref_0.shape[2]
-            canvas_pixels = height * width
-            if native_pixels >= canvas_pixels:
-                # ref_0 is larger — use native; crop_box already in native coords
-                bg_for_crop = ref_0
-                bg_h, bg_w = ref_0.shape[1], ref_0.shape[2]
-            else:
-                # canvas is larger — use image_resized; remap crop_box to canvas coords
-                bg_for_crop = image_resized
-                bg_h, bg_w = height, width
-                # crop_box_canvas coords are already canvas coords — reuse them
-                cx1, cy1, cx2, cy2 = crop_box_canvas
-                crop_box = (cx1, cy1, cx2, cy2)
-                orig_size = (height, width)
-
+            bg_for_crop = ref_0
+            bg_h, bg_w = ref_0.shape[1], ref_0.shape[2]
             if processed_mask is not None:
                 processed_mask_native = _resize_mask(processed_mask, bg_w, bg_h)
 
@@ -379,6 +359,10 @@ class NKDKleinPostsampling(io.ComfyNode):
             ],
             outputs=[
                 io.Image.Output("image"),
+                io.Image.Output("debug_difference",
+                    tooltip="Amplified absolute difference between the composite and "
+                            "the original — connect to a Preview to inspect alignment, "
+                            "bevel artifacts, or seam visibility. Gain ×4."),
             ],
         )
 
@@ -393,7 +377,7 @@ class NKDKleinPostsampling(io.ComfyNode):
         # Case 1: detailing crop → recompose onto ref_0 at native full resolution.
         # crop_box and crop_background are already in native coords (set by Presampling).
         if bundle.has_crop and bundle.crop_background is not None:
-            return io.NodeOutput(_uncrop(
+            composite = _uncrop(
                 patch=image,
                 background=bundle.crop_background,
                 crop_box=bundle.crop_box,
@@ -401,7 +385,9 @@ class NKDKleinPostsampling(io.ComfyNode):
                 mask=bundle.processed_mask_native if bundle.processed_mask_native is not None
                      else bundle.processed_mask,
                 feather=uncrop_feather,
-            ))
+            )
+            debug = _difference_debug(composite, bundle.crop_background)
+            return io.NodeOutput(composite, debug)
 
         # Case 2: inpainting without detailing → composite sampled over original
         if bundle.mode == "inpainting" and bundle.original_image is not None:
@@ -414,7 +400,18 @@ class NKDKleinPostsampling(io.ComfyNode):
                     sampled.shape[0], bundle.target_height, bundle.target_width, 1,
                     device=sampled.device,
                 )
-            return io.NodeOutput(sampled * alpha + orig * (1.0 - alpha))
+            composite = sampled * alpha + orig * (1.0 - alpha)
+            debug = _difference_debug(composite, orig)
+            return io.NodeOutput(composite, debug)
 
-        # Case 3: t2i / img2img → pass through
-        return io.NodeOutput(image)
+        # Case 3: t2i / img2img → pass through (no original to diff against)
+        debug = torch.zeros_like(image)
+        return io.NodeOutput(image, debug)
+
+
+def _difference_debug(composite: torch.Tensor, original: torch.Tensor, gain: float = 4.0) -> torch.Tensor:
+    """Amplified absolute difference, clamped to [0,1]. Returns a tensor matching the
+    composite's shape — falls back to a resize if the original differs in size."""
+    if original.shape != composite.shape:
+        original = _resize(original, composite.shape[2], composite.shape[1])
+    return (composite - original).abs().mul(gain).clamp(0.0, 1.0)
