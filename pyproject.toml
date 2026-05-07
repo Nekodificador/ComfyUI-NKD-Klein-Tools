@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "comfyui-nkd-klein-tools"
-version = "1.6.0"
+version = "1.6.1"
 description = "NKD Klein Presampling and Postsampling nodes for Flux Klein workflows in ComfyUI"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -12,8 +12,6 @@ requires-python = ">=3.10"
 dependencies = []
 classifiers = [
     "Operating System :: OS Independent",
-    "Environment :: GPU :: NVIDIA CUDA",
-    "Environment :: GPU :: AMD ROCm",
 ]
 
 [project.urls]
