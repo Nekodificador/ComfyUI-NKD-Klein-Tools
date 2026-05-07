@@ -130,19 +130,27 @@ _ASPECT_RATIO_OPTIONS = {
 }
 
 
-def _round8(v: int) -> int:
-    return max(8, (v + 7) // 8 * 8)
+# Flux 2 VAE compresses by /16 on each spatial axis. Any dimension that isn't
+# a multiple of 16 gets truncated by the encoder to the nearest /16 — the patch
+# decoded back is then smaller than _crop_by_mask expected, forcing _uncrop to
+# resize by ~1.01× and introducing the visible scale drift on composite. Round
+# everything to /16 to keep the pixel grid aligned through the VAE roundtrip.
+_VAE_MULTIPLE = 16
+
+
+def _round_vae(v: int) -> int:
+    return max(_VAE_MULTIPLE, (v + _VAE_MULTIPLE - 1) // _VAE_MULTIPLE * _VAE_MULTIPLE)
 
 
 def _scale_to_megapixels(width: int, height: int, target_pixels: int) -> Tuple[int, int]:
-    """Scale (width, height) proportionally to exactly target_pixels, rounded to ×8."""
+    """Scale (width, height) proportionally to exactly target_pixels, rounded to /16."""
     scale = (target_pixels / (width * height)) ** 0.5
-    return _round8(int(width * scale)), _round8(int(height * scale))
+    return _round_vae(int(width * scale)), _round_vae(int(height * scale))
 
 
 def _clamp_to_megapixel(width: int, height: int, target_pixels: int = 1_048_576) -> Tuple[int, int]:
     if width * height <= target_pixels:
-        return _round8(width), _round8(height)
+        return _round_vae(width), _round_vae(height)
     return _scale_to_megapixels(width, height, target_pixels)
 
 
@@ -173,7 +181,7 @@ def _resolve_resolution(
     w_parts, h_parts = _ASPECT_RATIO_OPTIONS[aspect_ratio]
     w = math.sqrt(target_pixels * w_parts / h_parts)
     h = math.sqrt(target_pixels * h_parts / w_parts)
-    return _round8(int(w)), _round8(int(h))
+    return _round_vae(int(w)), _round_vae(int(h))
 
 
 def _resolve_resolution_from_image(
@@ -207,7 +215,7 @@ def _bbox_from_mask(mask: torch.Tensor) -> Tuple[int, int, int, int]:
 def _expand_bbox_to_multiple(
     x1: int, y1: int, x2: int, y2: int,
     img_w: int, img_h: int,
-    multiple: int = 8,
+    multiple: int = _VAE_MULTIPLE,
 ) -> Tuple[int, int, int, int]:
     """Grow bbox so width/height are multiples of `multiple`, centered when possible.
     Falls back to shifting against the image edge if the grown bbox would clip out."""
@@ -237,7 +245,7 @@ def _expand_bbox_to_multiple(
 
 
 def _scale_to_megapixels_uniform(
-    width: int, height: int, target_pixels: int, multiple: int = 8,
+    width: int, height: int, target_pixels: int, multiple: int = _VAE_MULTIPLE,
 ) -> Tuple[int, int]:
     """Scale (w, h) to ~target_pixels with a SINGLE uniform factor on both axes,
     then round each axis independently to `multiple`. The shared factor preserves
@@ -257,7 +265,10 @@ def _crop_by_mask(
     """Crop image+mask around the mask bbox and resample to the MP budget.
 
     Strategy:
-      1. Derive bbox in image-native coords and grow to a multiple of 8 (Flux VAE).
+      1. Derive bbox in image-native coords and grow to a multiple of _VAE_MULTIPLE
+         (16 for Flux 2). Aligning to the VAE's native compression stride keeps the
+         encode→decode roundtrip pixel-exact: the decoded patch is the same shape
+         the bbox expected, so _uncrop pastes back 1:1 with no implicit resize.
       2. Crop directly from the source — no implicit resize.
       3. If the bbox is within ±5% of the MP budget, return it as-is (fast path:
          the patch will composite back 1:1 with no resize, no bevel).
@@ -283,7 +294,7 @@ def _crop_by_mask(
     x2 = min(ow, x2 + padding)
     y2 = min(oh, y2 + padding)
 
-    x1, y1, x2, y2 = _expand_bbox_to_multiple(x1, y1, x2, y2, ow, oh, multiple=8)
+    x1, y1, x2, y2 = _expand_bbox_to_multiple(x1, y1, x2, y2, ow, oh, multiple=_VAE_MULTIPLE)
 
     crop_w, crop_h = x2 - x1, y2 - y1
     cropped_raw = image[:, y1:y2, x1:x2, :]
