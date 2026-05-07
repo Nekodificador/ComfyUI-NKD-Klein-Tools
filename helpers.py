@@ -244,30 +244,75 @@ def _expand_bbox_to_multiple(
     return nx1, ny1, nx2, ny2
 
 
+def _pick_render_dims(
+    bbox_w: int, bbox_h: int, target_pixels: int, multiple: int = _VAE_MULTIPLE,
+) -> Tuple[int, int]:
+    """Pick (render_w, render_h), both /multiple, close to target_pixels and
+    matching the bbox aspect ratio as closely as `multiple` quantisation allows.
+
+    The render is computed independently (not as a scalar multiple of the bbox),
+    so its aspect ratio may drift up to one `multiple` per axis vs the bbox.
+    The caller (_crop_by_mask) compensates by GROWING the bbox to match the
+    render's aspect exactly — this is what keeps the _uncrop resize symmetric."""
+    if bbox_w <= 0 or bbox_h <= 0:
+        return multiple, multiple
+    aspect = bbox_w / bbox_h
+    # Solve render_w * render_h = target_pixels with render_w/render_h = aspect
+    render_h_ideal = (target_pixels / aspect) ** 0.5
+    render_w_ideal = render_h_ideal * aspect
+    render_w = max(multiple, int(round(render_w_ideal / multiple)) * multiple)
+    render_h = max(multiple, int(round(render_h_ideal / multiple)) * multiple)
+    return render_w, render_h
+
+
+def _grow_bbox_to_aspect(
+    x1: int, y1: int, x2: int, y2: int,
+    target_aspect: float,
+    img_w: int, img_h: int,
+    multiple: int = _VAE_MULTIPLE,
+) -> Tuple[int, int, int, int]:
+    """Grow the bbox so its aspect ratio matches `target_aspect` exactly while
+    staying /multiple-aligned, centred on the original bbox, clamped to image
+    bounds. Always grows (never shrinks) to preserve all of the masked region."""
+    cur_w = x2 - x1
+    cur_h = y2 - y1
+    cur_aspect = cur_w / cur_h
+
+    if cur_aspect < target_aspect:
+        # bbox too tall → widen
+        new_w_ideal = cur_h * target_aspect
+        new_w = max(cur_w, int((new_w_ideal + multiple - 1) // multiple) * multiple)
+        new_h = cur_h
+    else:
+        # bbox too wide → make taller
+        new_h_ideal = cur_w / target_aspect
+        new_h = max(cur_h, int((new_h_ideal + multiple - 1) // multiple) * multiple)
+        new_w = cur_w
+
+    # Re-centre on the original bbox centre, then snap to /multiple and clamp.
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    nx1 = (cx - new_w // 2) // multiple * multiple
+    ny1 = (cy - new_h // 2) // multiple * multiple
+    if nx1 < 0:
+        nx1 = 0
+    if ny1 < 0:
+        ny1 = 0
+    if nx1 + new_w > img_w:
+        nx1 = (img_w - new_w) // multiple * multiple
+        nx1 = max(0, nx1)
+    if ny1 + new_h > img_h:
+        ny1 = (img_h - new_h) // multiple * multiple
+        ny1 = max(0, ny1)
+    return nx1, ny1, nx1 + new_w, ny1 + new_h
+
+
 def _scale_to_megapixels_uniform(
     width: int, height: int, target_pixels: int, multiple: int = _VAE_MULTIPLE,
 ) -> Tuple[int, int]:
-    """Scale (w, h) to ~target_pixels using an INTEGER scale factor `k` such
-    that both new_w = width*k and new_h = height*k are multiples of `multiple`.
-    Because the bbox is already a multiple of `multiple` (enforced by
-    _expand_bbox_to_multiple), any integer k preserves alignment AND aspect
-    ratio EXACTLY. _uncrop's _resize_auto then applies the same scale factor
-    on both axes — no asymmetric drift, no aspect distortion.
-
-    Picks the integer k that minimises |k² * area − target_pixels|."""
-    if width <= 0 or height <= 0:
-        return multiple, multiple
-    area = width * height
-    # Ideal continuous scale
-    k_ideal = (target_pixels / area) ** 0.5
-    # Try k_floor and k_ceil; clamp to >=1 so we never shrink the bbox
-    k_floor = max(1, int(k_ideal))
-    k_ceil  = max(1, k_floor + 1)
-    # Pick the one closer to target area
-    err_floor = abs((k_floor ** 2) * area - target_pixels)
-    err_ceil  = abs((k_ceil  ** 2) * area - target_pixels)
-    k = k_floor if err_floor <= err_ceil else k_ceil
-    return width * k, height * k
+    """Backward-compat wrapper: returns (render_w, render_h) close to budget,
+    /multiple aligned, aspect-aware. Prefer _pick_render_dims for new callers."""
+    return _pick_render_dims(width, height, target_pixels, multiple)
 
 
 def _crop_by_mask(
@@ -279,20 +324,20 @@ def _crop_by_mask(
     """Crop image+mask around the mask bbox and resample to the MP budget.
 
     Strategy:
-      1. Derive bbox in image-native coords and grow to a multiple of _VAE_MULTIPLE
-         (16 for Flux 2). Aligning to the VAE's native compression stride keeps the
-         encode→decode roundtrip pixel-exact: the decoded patch is the same shape
-         the bbox expected, so _uncrop pastes back 1:1 with no implicit resize.
-      2. Crop directly from the source — no implicit resize.
-      3. If the bbox is within ±5% of the MP budget, return it as-is (fast path:
-         the patch will composite back 1:1 with no resize, no bevel).
-      4. Otherwise resample the crop to the budget with a SINGLE uniform factor
-         on both axes (preserves aspect exactly), using bicubic for upscale and
-         area filtering for downscale. This is what enables the detailer to act
-         as an upscaler when the user picks a higher MP budget.
+      1. Derive raw bbox from the mask + user padding.
+      2. Snap bbox to /_VAE_MULTIPLE.
+      3. Pick render dims close to target_pixels with bbox-aware aspect ratio.
+      4. GROW the bbox so its aspect matches the render exactly (still /multiple,
+         centred on original, clamped to image). This single-axis growth is the
+         key invariant: render_w/bbox_w == render_h/bbox_h, so _uncrop applies
+         a single symmetric scale factor on both axes — no aspect drift, no
+         asymmetric sub-pixel offset.
+      5. Crop the (grown) bbox directly from the source.
+      6. Resize the crop to render dims (bicubic for upscale, area for downscale).
 
-    crop_box always describes the patch's position in the source image; postsampling
-    resizes the decoded patch back to (crop_w, crop_h) when the resample happened."""
+    The fast path (no resize) triggers when render dims match bbox dims, i.e.
+    the bbox is already at the right scale — common when the bbox is close to
+    the budget."""
     b, oh, ow, _ = image.shape
 
     if mask is None:
@@ -310,25 +355,26 @@ def _crop_by_mask(
 
     x1, y1, x2, y2 = _expand_bbox_to_multiple(x1, y1, x2, y2, ow, oh, multiple=_VAE_MULTIPLE)
 
+    # Pick render dims targeting the budget with the bbox aspect, then grow the
+    # bbox to match the render's aspect EXACTLY so the resize is symmetric.
     crop_w, crop_h = x2 - x1, y2 - y1
+    render_w, render_h = _pick_render_dims(crop_w, crop_h, target_pixels)
+    target_aspect = render_w / render_h
+    x1, y1, x2, y2 = _grow_bbox_to_aspect(x1, y1, x2, y2, target_aspect, ow, oh)
+    crop_w, crop_h = x2 - x1, y2 - y1
+
     cropped_raw = image[:, y1:y2, x1:x2, :]
     mask_raw = full_mask[:, y1:y2, x1:x2]
 
-    # Pick the integer scale factor k that brings the bbox closest to the MP
-    # budget. _scale_to_megapixels_uniform returns crop_w*k, crop_h*k with k>=1,
-    # so the render dims are always integer multiples of the bbox dims — that's
-    # what guarantees _uncrop's resize is symmetric (no aspect distortion) and
-    # /_VAE_MULTIPLE-aligned (no VAE truncation).
-    new_w, new_h = _scale_to_megapixels_uniform(crop_w, crop_h, target_pixels)
-
-    # Fast path: k=1 means no resize is needed. The patch composites back 1:1.
-    if new_w == crop_w and new_h == crop_h:
+    # Fast path: bbox already at render size → no resize, patch composites 1:1.
+    if render_w == crop_w and render_h == crop_h:
         return cropped_raw, mask_raw, (x1, y1, x2, y2), (oh, ow)
 
-    # Otherwise upscale (k>=2). Always bicubic since we never downscale below
-    # bbox dims with this scheme.
-    cropped = _resize_auto(cropped_raw, new_w, new_h)
-    cm = _resize_mask(mask_raw, new_w, new_h)
+    # Resize. _resize_auto picks bicubic for upscale and area for downscale.
+    # Because grow_bbox_to_aspect aligned bbox aspect with render aspect, the
+    # scale factor is identical on both axes — no aspect distortion.
+    cropped = _resize_auto(cropped_raw, render_w, render_h)
+    cm = _resize_mask(mask_raw, render_w, render_h)
     return cropped, cm, (x1, y1, x2, y2), (oh, ow)
 
 
