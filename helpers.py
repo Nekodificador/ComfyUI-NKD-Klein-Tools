@@ -247,13 +247,27 @@ def _expand_bbox_to_multiple(
 def _scale_to_megapixels_uniform(
     width: int, height: int, target_pixels: int, multiple: int = _VAE_MULTIPLE,
 ) -> Tuple[int, int]:
-    """Scale (w, h) to ~target_pixels with a SINGLE uniform factor on both axes,
-    then round each axis independently to `multiple`. The shared factor preserves
-    aspect ratio exactly; the rounding is at most `multiple-1` px per axis."""
-    scale = (target_pixels / (width * height)) ** 0.5
-    new_w = max(multiple, int(round(width * scale / multiple)) * multiple)
-    new_h = max(multiple, int(round(height * scale / multiple)) * multiple)
-    return new_w, new_h
+    """Scale (w, h) to ~target_pixels using an INTEGER scale factor `k` such
+    that both new_w = width*k and new_h = height*k are multiples of `multiple`.
+    Because the bbox is already a multiple of `multiple` (enforced by
+    _expand_bbox_to_multiple), any integer k preserves alignment AND aspect
+    ratio EXACTLY. _uncrop's _resize_auto then applies the same scale factor
+    on both axes — no asymmetric drift, no aspect distortion.
+
+    Picks the integer k that minimises |k² * area − target_pixels|."""
+    if width <= 0 or height <= 0:
+        return multiple, multiple
+    area = width * height
+    # Ideal continuous scale
+    k_ideal = (target_pixels / area) ** 0.5
+    # Try k_floor and k_ceil; clamp to >=1 so we never shrink the bbox
+    k_floor = max(1, int(k_ideal))
+    k_ceil  = max(1, k_floor + 1)
+    # Pick the one closer to target area
+    err_floor = abs((k_floor ** 2) * area - target_pixels)
+    err_ceil  = abs((k_ceil  ** 2) * area - target_pixels)
+    k = k_floor if err_floor <= err_ceil else k_ceil
+    return width * k, height * k
 
 
 def _crop_by_mask(
@@ -300,16 +314,19 @@ def _crop_by_mask(
     cropped_raw = image[:, y1:y2, x1:x2, :]
     mask_raw = full_mask[:, y1:y2, x1:x2]
 
-    bbox_pixels = crop_w * crop_h
-    # Fast path: if the bbox is already within ±5% of the MP budget, skip the resize.
-    # Resampling by ~1.02× wastes detail (VAE roundtrip + bicubic) without buying
-    # meaningful resolution — and keeps the patch 1:1 with the source for compositing.
-    ratio = bbox_pixels / target_pixels
-    if 0.95 <= ratio <= 1.05:
+    # Pick the integer scale factor k that brings the bbox closest to the MP
+    # budget. _scale_to_megapixels_uniform returns crop_w*k, crop_h*k with k>=1,
+    # so the render dims are always integer multiples of the bbox dims — that's
+    # what guarantees _uncrop's resize is symmetric (no aspect distortion) and
+    # /_VAE_MULTIPLE-aligned (no VAE truncation).
+    new_w, new_h = _scale_to_megapixels_uniform(crop_w, crop_h, target_pixels)
+
+    # Fast path: k=1 means no resize is needed. The patch composites back 1:1.
+    if new_w == crop_w and new_h == crop_h:
         return cropped_raw, mask_raw, (x1, y1, x2, y2), (oh, ow)
 
-    # Otherwise resample uniformly to the MP budget. Upscale → bicubic; downscale → area.
-    new_w, new_h = _scale_to_megapixels_uniform(crop_w, crop_h, target_pixels)
+    # Otherwise upscale (k>=2). Always bicubic since we never downscale below
+    # bbox dims with this scheme.
     cropped = _resize_auto(cropped_raw, new_w, new_h)
     cm = _resize_mask(mask_raw, new_w, new_h)
     return cropped, cm, (x1, y1, x2, y2), (oh, ow)
