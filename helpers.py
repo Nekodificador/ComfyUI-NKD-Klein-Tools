@@ -379,9 +379,20 @@ def _uncrop(
 # ReferenceLatent
 # ---------------------------------------------------------------------------
 
-def _encode_reference_latent(ref_image: torch.Tensor, vae) -> torch.Tensor:
-    """Encode an image as a Klein reference latent. Clamped to 1MP to avoid VAE
-    OOM on huge inputs, preserving aspect ratio."""
+def _encode_reference_latent(ref_image: torch.Tensor, vae, skip_clamp: bool = False) -> torch.Tensor:
+    """Encode an image as a Klein reference latent.
+
+    By default the input is clamped to 1MP to keep the VAE memory footprint
+    bounded for raw user references that may be arbitrarily large.
+
+    When `skip_clamp=True` the image is passed to the VAE as-is. Use this when
+    the input is already a sampler-bound tensor (e.g. the detailer crop_img):
+    re-resizing with a different filter and a non-integer factor leaves the
+    reference on a slightly different pixel grid than the main latent, which
+    surfaces as a sub-pixel scale drift on the composite. Same tensor → same
+    grid → no drift."""
+    if skip_clamp:
+        return vae.encode(ref_image[:, :, :, :3])
     rw, rh = _clamp_to_megapixel(ref_image.shape[2], ref_image.shape[1])
     img = _resize(ref_image, rw, rh)
     return vae.encode(img[:, :, :, :3])

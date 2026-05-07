@@ -234,40 +234,57 @@ class NKDKleinPresampling(io.ComfyNode):
             )
             orig_size = (native_h, native_w)
 
-        # 6. ReferenceLatent — encode each reference once and append to both pos
-        # and neg. Skipped entirely when bypass_reference is True so the model runs
-        # as a standard img2img/inpainting without Klein reference guidance.
+        # 6. Encode the main latent (we may reuse it as the primary reference).
+        # In detailing mode the patch is encoded once here and reused for both
+        # the sampler's noise base AND the Klein reference, so the reference
+        # sits on the EXACT same pixel grid as the main latent — no extra
+        # resize, no filter mismatch, no asymmetric scale drift.
+        primary_latent = None
+        if use_detailing and crop_img is not None:
+            primary_latent = vae.encode(crop_img[:, :, :, :3])
+            if mode == "inpainting" and crop_m is not None:
+                nm = _resize_mask(crop_m, primary_latent.shape[3], primary_latent.shape[2])
+                latent = {"samples": primary_latent, "noise_mask": nm}
+            else:
+                latent = {"samples": primary_latent}
+        elif mode == "inpainting":
+            primary_latent = vae.encode(image_resized[:, :, :, :3])
+            nm = _resize_mask(processed_mask, primary_latent.shape[3], primary_latent.shape[2])
+            latent = {"samples": primary_latent, "noise_mask": nm}
+        elif mode == "img2img":
+            primary_latent = vae.encode(image_resized[:, :, :, :3])
+            latent = {"samples": primary_latent}
+        else:  # t2i
+            latent = _make_empty_latent(width, height)
+
+        # 7. ReferenceLatent — append the primary patch reference plus any
+        # additional ref_1+ references. Skipped entirely when bypass_reference
+        # is True so the model runs as a standard img2img/inpainting without
+        # Klein reference guidance.
         if not bypass_reference:
-            ref_inputs = []
-            if crop_img is not None:
-                ref_inputs.append(crop_img)
+            # Detailing: re-use the already-encoded crop latent as the reference.
+            # This keeps the reference on the EXACT same pixel grid as the main
+            # latent (same VAE pass, same shape). Eliminates the sub-pixel scale
+            # drift that surfaced when the reference was independently resized
+            # with a different filter and a non-integer factor.
+            if use_detailing and primary_latent is not None:
+                pos = _apply_reference_latent(pos, primary_latent)
+                neg = _apply_reference_latent(neg, primary_latent)
             elif ref_0 is not None:
-                ref_inputs.append(ref_0)
-            ref_inputs.extend(refs[1:])
-            for ref_img in ref_inputs:
-                ref_latent = _encode_reference_latent(ref_img, vae)
+                # Non-detailing modes still encode ref_0 with the 1MP clamp
+                # (existing behaviour — no grid-sharing required since the main
+                # latent operates at canvas resolution, not at the ref_0 grid).
+                ref_latent = _encode_reference_latent(ref_0, vae)
                 pos = _apply_reference_latent(pos, ref_latent)
                 neg = _apply_reference_latent(neg, ref_latent)
 
-        # 7. Build latent
-        if use_detailing and crop_img is not None:
-            encoded = vae.encode(crop_img[:, :, :, :3])
-            if mode == "inpainting" and crop_m is not None:
-                nm = _resize_mask(crop_m, encoded.shape[3], encoded.shape[2])
-                latent = {"samples": encoded, "noise_mask": nm}
-            else:
-                latent = {"samples": encoded}
-
-        elif mode == "inpainting":
-            encoded = vae.encode(image_resized[:, :, :, :3])
-            nm = _resize_mask(processed_mask, encoded.shape[3], encoded.shape[2])
-            latent = {"samples": encoded, "noise_mask": nm}
-
-        elif mode == "img2img":
-            latent = {"samples": vae.encode(image_resized[:, :, :, :3])}
-
-        else:  # t2i
-            latent = _make_empty_latent(width, height)
+            # Additional references (ref_1, ref_2, …) are user-supplied raw
+            # images and may be arbitrarily large — keep the 1MP clamp on them
+            # to bound VAE memory.
+            for ref_img in refs[1:]:
+                ref_latent = _encode_reference_latent(ref_img, vae)
+                pos = _apply_reference_latent(pos, ref_latent)
+                neg = _apply_reference_latent(neg, ref_latent)
 
         # 8. Apply DifferentialDiffusion when a mask is present (inpainting or detailing).
         model = model.clone()
