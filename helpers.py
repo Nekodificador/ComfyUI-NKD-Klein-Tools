@@ -351,12 +351,17 @@ def _uncrop(
 # ReferenceLatent
 # ---------------------------------------------------------------------------
 
-def _apply_reference_latent(conditioning: list, ref_image: torch.Tensor, vae) -> list:
-    import node_helpers
-    # Clamp to 1MP so the VAE doesn't OOM on large inputs, preserving the native aspect ratio.
+def _encode_reference_latent(ref_image: torch.Tensor, vae) -> torch.Tensor:
+    """Encode an image as a Klein reference latent. Clamped to 1MP to avoid VAE
+    OOM on huge inputs, preserving aspect ratio."""
     rw, rh = _clamp_to_megapixel(ref_image.shape[2], ref_image.shape[1])
     img = _resize(ref_image, rw, rh)
-    ref_latent = vae.encode(img[:, :, :, :3])
+    return vae.encode(img[:, :, :, :3])
+
+
+def _apply_reference_latent(conditioning: list, ref_latent: torch.Tensor) -> list:
+    """Append an already-encoded reference latent to the conditioning."""
+    import node_helpers
     return node_helpers.conditioning_set_values(
         conditioning,
         {"reference_latents": [ref_latent]},

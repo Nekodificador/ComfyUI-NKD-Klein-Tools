@@ -9,6 +9,7 @@ from .helpers import (
     _mask_grow,
     _crop_by_mask,
     _uncrop,
+    _encode_reference_latent,
     _apply_reference_latent,
     _resolve_resolution,
     _ASPECT_RATIO_OPTIONS,
@@ -142,17 +143,6 @@ class NKDKleinPresampling(io.ComfyNode):
         )
 
     @classmethod
-    def is_changed(cls, mask=None, **kwargs):
-        # Only hash the mask — ref_images and prompts are handled by ComfyUI's
-        # normal upstream-change detection. Hashing ref_images here caused the
-        # node to re-execute on every tile even when only the mask changed.
-        import hashlib
-        h = hashlib.md5()
-        if mask is not None:
-            h.update(mask.cpu().numpy().tobytes())
-        return h.hexdigest()
-
-    @classmethod
     def execute(
         cls,
         model,
@@ -213,44 +203,51 @@ class NKDKleinPresampling(io.ComfyNode):
         # 3. Canvas-sized image (for VAEEncode / mask alignment / crop background)
         image_resized = _resize(ref_0, width, height) if has_image else None
 
-        # 4. Process mask
+        # 4. Process masks at canvas and native resolutions.
+        # processed_mask_native is built directly from the raw mask (resize → grow →
+        # blur), NOT from processed_mask, so the bbox computation and the composite
+        # share the exact same alpha. A canvas→native roundtrip would add two bilinears
+        # with align_corners=False, shifting edges sub-pixel and producing the emboss
+        # ring around the patch in debug_difference.
         processed_mask = None
+        processed_mask_native = None
         if has_mask:
             m = mask if mask.dim() == 3 else mask.unsqueeze(0)
             processed_mask = _mask_grow(_resize_mask(m, width, height), mask_expand, mask_blur)
+            if has_image:
+                native_h, native_w = ref_0.shape[1], ref_0.shape[2]
+                m_native = _resize_mask(m, native_w, native_h)
+                processed_mask_native = _mask_grow(m_native, mask_expand, mask_blur)
 
         # 5. Compute detailing crop before ReferenceLatent so the sampler sees the crop region.
         # The crop is taken directly from ref_0 in its native pixel grid: no canvas→native
         # remap, no asymmetric rounding, and the crop_box edges are already multiples of 8
         # so the VAE consumes them without implicit padding. This keeps the patch's pixels
         # 1:1 with the source region — Postsampling pastes back without any resize when the
-        # bbox fit the MP budget.
+        # bbox fit the MP budget. The bbox uses processed_mask_native (same as composite).
         crop_img = crop_m = crop_box = orig_size = None
         if use_detailing and has_image:
             native_h, native_w = ref_0.shape[1], ref_0.shape[2]
-            # Build a native-resolution mask for the bbox computation.
-            if processed_mask is not None:
-                native_mask = _resize_mask(processed_mask, native_w, native_h)
-            else:
-                native_mask = None
             crop_img, crop_m, crop_box, _ = _crop_by_mask(
-                ref_0, native_mask, detail_padding,
+                ref_0, processed_mask_native, detail_padding,
                 _MEGAPIXEL_OPTIONS[megapixels],
             )
             orig_size = (native_h, native_w)
 
-        # 6. ReferenceLatent — skipped entirely when bypass_reference is True so the
-        # model runs as a standard img2img/inpainting without Klein reference guidance.
+        # 6. ReferenceLatent — encode each reference once and append to both pos
+        # and neg. Skipped entirely when bypass_reference is True so the model runs
+        # as a standard img2img/inpainting without Klein reference guidance.
         if not bypass_reference:
+            ref_inputs = []
             if crop_img is not None:
-                pos = _apply_reference_latent(pos, crop_img, vae)
-                neg = _apply_reference_latent(neg, crop_img, vae)
+                ref_inputs.append(crop_img)
             elif ref_0 is not None:
-                pos = _apply_reference_latent(pos, ref_0, vae)
-                neg = _apply_reference_latent(neg, ref_0, vae)
-            for ref in refs[1:]:
-                pos = _apply_reference_latent(pos, ref, vae)
-                neg = _apply_reference_latent(neg, ref, vae)
+                ref_inputs.append(ref_0)
+            ref_inputs.extend(refs[1:])
+            for ref_img in ref_inputs:
+                ref_latent = _encode_reference_latent(ref_img, vae)
+                pos = _apply_reference_latent(pos, ref_latent)
+                neg = _apply_reference_latent(neg, ref_latent)
 
         # 7. Build latent
         if use_detailing and crop_img is not None:
@@ -294,22 +291,10 @@ class NKDKleinPresampling(io.ComfyNode):
             model.set_model_denoise_mask_function(_diff_diffusion)
 
         # 9. Build bundle.
-        # Detailing background is always ref_0 native — crop_box is already in native coords
-        # and aligned to multiples of 8. Postsampling pastes the patch back at full source res.
-        # The native mask is rebuilt from the source mask directly (resize → grow → blur)
-        # rather than resampling processed_mask back from canvas. A canvas→native roundtrip
-        # is two bilinears with align_corners=False, which shifts edges sub-pixel and leaves
-        # non-zero alpha *outside* the original mask region — that's what shows up as the
-        # emboss ring around the patch in debug_difference.
-        processed_mask_native = None
-        bg_for_crop = None
-        if crop_box is not None and ref_0 is not None:
-            bg_for_crop = ref_0
-            bg_h, bg_w = ref_0.shape[1], ref_0.shape[2]
-            if has_mask:
-                m_native = mask if mask.dim() == 3 else mask.unsqueeze(0)
-                m_native = _resize_mask(m_native, bg_w, bg_h)
-                processed_mask_native = _mask_grow(m_native, mask_expand, mask_blur)
+        # Detailing background is always ref_0 native — crop_box is already in native
+        # coords and aligned to multiples of 8. Postsampling pastes the patch back at
+        # full source res using processed_mask_native (same alpha as the bbox).
+        bg_for_crop = ref_0 if crop_box is not None else None
 
         bundle = KleinBundle(
             target_width=width,
@@ -320,12 +305,18 @@ class NKDKleinPresampling(io.ComfyNode):
             processed_mask=processed_mask,
             processed_mask_native=processed_mask_native,
             has_crop=crop_box is not None,
-            crop_background=bg_for_crop if crop_box is not None else None,
+            crop_background=bg_for_crop,
             crop_box=crop_box,
             crop_original_size=orig_size,
         )
 
-        out_mask = processed_mask[0] if processed_mask is not None else torch.zeros(1, height, width, dtype=torch.float32)
+        # MASK is always emitted as [B, H, W] to match ComfyUI's standard shape,
+        # so downstream nodes (NKDTileMerge, MaskComposite, …) don't have to
+        # special-case rank.
+        out_mask = (
+            processed_mask if processed_mask is not None
+            else torch.zeros(1, height, width, dtype=torch.float32)
+        )
         return io.NodeOutput(model, pos, neg, latent, bundle, out_mask)
 
 
