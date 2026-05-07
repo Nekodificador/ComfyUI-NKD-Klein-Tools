@@ -28,25 +28,27 @@ class NKDKleinPresampling(io.ComfyNode):
             display_name="😺NKD Klein Presampling",
             category="😺NKD Nodes/Klein",
             description=(
-                "Prepares conditioning, latent and bundle for a Flux Klein workflow. "
-                "ref_0 is the main image: it feeds ReferenceLatent, VAEEncode and "
-                "the detailing crop. Additional references appear as you connect each one. "
-                "Connecting mask activates inpainting mode. "
-                "Connect NAGuidance → DifferentialDiffusion → Sampler → VAEDecode "
-                "between this node and NKDKleinPostsampling."
+                "All-in-one starting point for a Flux Klein workflow. "
+                "Connect your model, prompt and reference image, and this node prepares "
+                "everything the sampler needs. Pair it with NKD Klein Postsampling at the "
+                "end of the chain — between the two goes your sampler."
             ),
             inputs=[
-                io.Model.Input("model", tooltip="Flux Klein model — DifferentialDiffusion is applied internally when a mask is connected"),
-                io.Clip.Input("clip", tooltip="CLIP encoder from the Flux Klein loader"),
-                io.Vae.Input("vae",  tooltip="VAE from the Flux Klein loader"),
+                io.Model.Input("model", tooltip="Your Flux Klein model."),
+                io.Clip.Input("clip", tooltip="The text encoder that goes with the model."),
+                io.Vae.Input("vae",  tooltip="The VAE that goes with the model."),
 
                 io.String.Input("positive", default="", multiline=True,
-                    tooltip="Positive prompt"),
+                    tooltip="Describe what you want in the image."),
                 io.String.Input("negative", default="", multiline=True,
-                    tooltip="Negative prompt"),
+                    tooltip="Describe what you don't want."),
 
                 io.Boolean.Input("pin_model", default=False,
-                    tooltip="Keep the model loaded in VRAM. Only enable if you have enough VRAM — will OOM instead of swapping.",
+                    tooltip=(
+                        "Keeps the model in your graphics card so it doesn't reload "
+                        "between runs. Faster, but only turn it on if you have plenty "
+                        "of VRAM."
+                    ),
                     display_name="Pin Model"),
 
                 # ---- resolution ----
@@ -54,32 +56,46 @@ class NKDKleinPresampling(io.ComfyNode):
                     options=_ASPECT_RATIO_KEYS,
                     default="As Reference",
                     tooltip=(
-                        "Canvas aspect ratio. "
-                        "'As Reference' derives the ratio from ref_0 at the chosen MP budget. "
-                        "'Custom' enables manual width/height inputs. "
-                        "In inpainting mode the ratio is always derived from ref_0."
+                        "The shape of the final image. 'As Reference' copies the "
+                        "shape of your input image. 'Custom' lets you type any "
+                        "size you want."
                     ),
                     display_name="Aspect Ratio"),
                 io.Combo.Input("megapixels",
                     options=_MEGAPIXEL_KEYS,
                     default="1 MP",
-                    tooltip="Total pixel budget for the canvas. Higher values produce larger outputs.",
+                    tooltip=(
+                        "How big the final image should be. Bigger values mean more "
+                        "detail and sharper results, but also slower generation and "
+                        "more VRAM needed."
+                    ),
                     display_name="Megapixels"),
                 io.Int.Input("custom_width",  default=1024, min=64, max=8192, step=8,
-                    tooltip="Used only when Aspect Ratio is set to Custom",
+                    tooltip="Width in pixels. Only used when Aspect Ratio is set to Custom.",
                     display_name="Custom Width"),
                 io.Int.Input("custom_height", default=1024, min=64, max=8192, step=8,
-                    tooltip="Used only when Aspect Ratio is set to Custom",
+                    tooltip="Height in pixels. Only used when Aspect Ratio is set to Custom.",
                     display_name="Custom Height"),
 
                 # ---- mode overrides ----
                 io.Boolean.Input("bypass_reference", default=False,
                     tooltip=(
-                        "Skip all ReferenceLatent injection and run as a standard img2img / "
-                        "inpainting model. Useful when you want the model to work without "
-                        "Klein's reference guidance."
+                        "Turn off the model's ability to look at your reference image "
+                        "while it works. Leave it off in most cases — turn it on only "
+                        "if you want the model to ignore the reference completely."
                     ),
                     display_name="Bypass Reference"),
+
+                io.Int.Input("reference_strength", default=0, min=-3, max=10, step=1,
+                    tooltip=(
+                        "How tightly the result follows the layout of your reference "
+                        "image. 0 is the default (balanced — good for most edits). "
+                        "Higher values lock the result more strictly to the original "
+                        "layout (useful when things need to line up perfectly with the "
+                        "input). Negative values give the model more creative freedom "
+                        "to reinterpret what it sees."
+                    ),
+                    display_name="Reference Strength"),
 
                 # ---- reference images (autogrow) ----
                 io.Autogrow.Input(
@@ -88,47 +104,64 @@ class NKDKleinPresampling(io.ComfyNode):
                         input=io.Image.Input("img",
                             optional=True,
                             tooltip=(
-                                "ref_0: main image — ReferenceLatent, VAEEncode base and "
-                                "detailing background. ref_1+: additional ReferenceLatent passes."
+                                "ref_0 is your main image — the one you want to edit "
+                                "or use as a starting point. Extra slots (ref_1, "
+                                "ref_2…) let you give the model more images to draw "
+                                "inspiration from."
                             )),
                         prefix="ref_",
                         min=1,
                         max=8,
                     ),
-                    tooltip="Connect ref_0 for img2img/inpainting. Additional slots appear automatically.",
+                    tooltip=(
+                        "Connect your input image to ref_0. More slots will appear "
+                        "automatically if you want to add extra reference images."
+                    ),
                 ),
 
                 # ---- mask ----
                 io.Mask.Input("mask", optional=True,
                     tooltip=(
-                        "Inpaint mask — white = regenerate. "
-                        "Activates inpainting mode and drives the detailing crop region."
+                        "Paint a mask to tell the model which part of the image to "
+                        "regenerate. White areas get redone, black areas stay the "
+                        "same. Connecting a mask switches the node into inpainting mode."
                     )),
 
                 io.Int.Input("mask_expand", default=20, min=0, max=512,
-                    tooltip="Grow mask by this many pixels before encoding",
+                    tooltip=(
+                        "Makes the masked area a bit bigger so the regenerated "
+                        "region blends naturally with its surroundings."
+                    ),
                     display_name="Mask Expand"),
                 io.Int.Input("mask_blur", default=10, min=0, max=512,
-                    tooltip="Blur mask edges after growing",
+                    tooltip=(
+                        "Softens the edges of the mask so the transition between "
+                        "the new and old parts of the image looks smoother."
+                    ),
                     display_name="Mask Blur"),
                 io.Float.Input("inpaint_blend", default=1.0, min=0.0, max=1.0, step=0.01,
                     tooltip=(
-                        "Controls the transition between the inpainted region and the original image. "
-                        "1.0 = sharp binary transition driven by the mask. "
-                        "Lower values blend the mask gradient into the transition for softer edges."
+                        "Controls how sharp the transition is between the regenerated "
+                        "area and the original image. 0.0 gives a clean cut along "
+                        "the mask edge; higher values fade the two together more gently."
                     ),
                     display_name="Inpaint Blend"),
 
                 # ---- detailing ----
                 io.Boolean.Input("use_detailing", default=False,
                     tooltip=(
-                        "Crops and upscales the masked region before sampling. "
-                        "The crop is scaled to the same MP budget as the canvas. "
-                        "NKDKleinPostsampling recomposes the result. Requires ref_0 and mask."
+                        "Zooms into the masked area before regenerating it, so you "
+                        "get more detail in small zones (faces, hands, eyes…) "
+                        "without having to upscale the whole image. Needs both an "
+                        "input image and a mask."
                     ),
                     display_name="Use Detailing"),
                 io.Int.Input("detail_padding", default=50, min=0, max=512,
-                    tooltip="Padding (px) around the mask bounding box",
+                    tooltip=(
+                        "How much extra space around the mask the zoom should "
+                        "include. More padding gives the model more context, less "
+                        "padding focuses tighter on the masked area."
+                    ),
                     display_name="Detail Padding"),
             ],
             outputs=[
@@ -138,7 +171,10 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Latent.Output("latent"),
                 NKDKleinBundleType.Output("bundle"),
                 io.Mask.Output("mask", display_name="mask",
-                    tooltip="Processed mask after grow and blur — connect to NKDTileMerge tile_masks for correct masked compositing."),
+                    tooltip=(
+                        "The mask after expanding and softening — useful if a "
+                        "downstream node needs to know which area was regenerated."
+                    )),
             ],
         )
 
@@ -163,6 +199,7 @@ class NKDKleinPresampling(io.ComfyNode):
         pin_model: bool = False,
         use_detailing: bool = False,
         detail_padding: int = 50,
+        reference_strength: int = 0,
     ) -> io.NodeOutput:
 
         # 0. Pin model in VRAM if requested
@@ -262,18 +299,21 @@ class NKDKleinPresampling(io.ComfyNode):
         # is True so the model runs as a standard img2img/inpainting without
         # Klein reference guidance.
         if not bypass_reference:
-            # Detailing: re-use the already-encoded crop latent as the reference.
-            # This keeps the reference on the EXACT same pixel grid as the main
-            # latent (same VAE pass, same shape). Eliminates the sub-pixel scale
-            # drift that surfaced when the reference was independently resized
-            # with a different filter and a non-integer factor.
-            if use_detailing and primary_latent is not None:
+            # Whenever we already encoded a primary_latent (detailing crop OR
+            # canvas-sized image for img2img/inpainting), re-use it as the
+            # primary reference. This keeps reference and main latent on the
+            # EXACT same pixel grid — same shape, same VAE pass — which matters
+            # most when reference_strength > 1: tighter ref_index_scale makes
+            # the model treat reference tokens as positional neighbours, and a
+            # mismatch in latent shape between reference and canvas surfaces as
+            # geometric breakage instead of just sub-pixel drift.
+            if primary_latent is not None:
                 pos = _apply_reference_latent(pos, primary_latent)
                 neg = _apply_reference_latent(neg, primary_latent)
             elif ref_0 is not None:
-                # Non-detailing modes still encode ref_0 with the 1MP clamp
-                # (existing behaviour — no grid-sharing required since the main
-                # latent operates at canvas resolution, not at the ref_0 grid).
+                # t2i with a ref_0 (no main latent encoded): fall back to the
+                # 1MP-clamped encode path. Reference shape will not match the
+                # empty latent, but t2i has no main image to anchor anyway.
                 ref_latent = _encode_reference_latent(ref_0, vae)
                 pos = _apply_reference_latent(pos, ref_latent)
                 neg = _apply_reference_latent(neg, ref_latent)
@@ -306,6 +346,29 @@ class NKDKleinPresampling(io.ComfyNode):
                     return blend * binary_mask + (1.0 - blend) * denoise_mask
                 return binary_mask
             model.set_model_denoise_mask_function(_diff_diffusion)
+
+        # 8b. Reference Strength — tighten the positional binding between the
+        # reference latents and the canvas tokens. Klein/Flux2 ship with
+        # ref_index_scale=10, which gives the model maximum interpretive
+        # freedom (good for editing, but lets the geometry drift sub-pixel at
+        # high denoise). Lower values bring the reference index closer to the
+        # canvas index, increasing the attention's positional anchor.
+        # Applied via add_object_patch so the change is scoped to this sample
+        # and reverts automatically when ComfyUI unpatches the model.
+        if reference_strength != 0 and not bypass_reference:
+            _REF_INDEX_SCALE_MAP = {
+                -3: 30.0, -2: 22.0, -1: 15.0,
+                 0: 10.0,
+                 1: 8.5,   2: 7.0,  3: 6.0,  4: 5.0,  5: 4.0,
+                 6: 3.5,   7: 3.0,  8: 2.5,  9: 2.0, 10: 1.5,
+            }
+            new_scale = _REF_INDEX_SCALE_MAP.get(int(reference_strength), 10.0)
+            try:
+                model.add_object_patch("diffusion_model.params.ref_index_scale", new_scale)
+            except Exception:
+                # Non-Klein models don't have this attribute; silently ignore
+                # so the node stays usable on any Flux variant.
+                pass
 
         # 9. Build bundle.
         # Detailing background is always ref_0 native — crop_box is already in native
@@ -359,25 +422,36 @@ class NKDKleinPostsampling(io.ComfyNode):
             display_name="😺NKD Klein Postsampling",
             category="😺NKD Nodes/Klein",
             description=(
-                "Receives the VAEDecode output from a Flux Klein pipeline and "
-                "recomposes crops or applies inpaint compositing using the bundle "
-                "from NKDKleinPresampling."
+                "The other half of the Klein workflow. Pair it with NKD Klein "
+                "Presampling — connect your sampler's image output here, plus the "
+                "bundle from the start of the chain, and this node delivers the "
+                "final image ready to use."
             ),
             inputs=[
                 io.Image.Input("image",
-                    tooltip="Decoded image from VAEDecode (after sampler)"),
+                    tooltip="The image coming out of your sampler chain."),
                 NKDKleinBundleType.Input("bundle",
-                    tooltip="Bundle from NKDKleinPresampling"),
+                    tooltip=(
+                        "Comes from NKD Klein Presampling. Carries everything this "
+                        "node needs to assemble the final image."
+                    )),
                 io.Int.Input("uncrop_feather", default=10, min=0, max=256,
-                    tooltip="Feather radius (px) when compositing the crop back onto the background",
+                    tooltip=(
+                        "How softly the regenerated zone blends back into the "
+                        "original image. Higher values give a more gradual "
+                        "transition; lower values keep the edge crisp."
+                    ),
                     display_name="Uncrop Feather"),
             ],
             outputs=[
                 io.Image.Output("image"),
                 io.Image.Output("debug_difference",
-                    tooltip="Amplified absolute difference between the composite and "
-                            "the original — connect to a Preview to inspect alignment, "
-                            "bevel artifacts, or seam visibility. Gain ×4."),
+                    tooltip=(
+                        "A debug view that exaggerates the difference between the "
+                        "result and the original. Connect it to a Preview Image "
+                        "to spot where things changed and check the edges look "
+                        "clean. Not needed for normal use."
+                    )),
             ],
         )
 
