@@ -1,87 +1,128 @@
 # NKD Klein Tools
 
-Two ComfyUI nodes that wrap the Flux Klein pipeline into a simple pre/post pair. Connect your images, write your prompt, and run — all the internal Klein machinery is handled automatically.
+A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. Plug in your model, drop an image, write a prompt, and go — no manual wiring of internal pieces. Whether you want to generate from scratch, transform an existing photo, paint over a specific area, or zoom in for a high-detail touch-up, the same two nodes handle it all.
 
 <img width="2219" height="1001" alt="image" src="https://github.com/user-attachments/assets/70a51042-42a9-40f8-8e2e-4230feeba097" />
 
+---
+
+## What you can do with it
+
+- **Generate images from a prompt** — just connect the model and write what you want.
+- **Transform an existing image** — drop your image into the reference slot and add a prompt describing the change.
+- **Inpaint a specific area** — paint a mask and the masked zone is the only part that gets regenerated. Everything else stays untouched.
+- **Detail a small area at high quality** — turn on detailing to zoom into the masked zone (a face, a hand, an eye) and regenerate it with way more detail than you'd get from a full-image pass.
+- **Combine multiple reference images** — extra slots appear as you connect them, so you can give the model several visual hints to work with.
+
+The node figures out which mode you're using based on what you connect — no setting to flip.
 
 ---
 
-## Nodes
+## The two nodes
 
 ### 😺NKD Klein Presampling
 
-Prepares everything the sampler needs: conditioning, latent, and a bundle that carries context through to the post node.
-
-**Connect your sampler chain between Presampling and Postsampling:**
-
-```
-NKD Klein Presampling → NAGuidance → Sampler → VAEDecode → NKD Klein Postsampling
-```
-
-#### Inputs
-
-| Input | Description |
-|---|---|
-| **model** | Flux Klein model from the loader |
-| **clip** | CLIP from the loader |
-| **vae** | VAE from the loader |
-| **positive** | Positive prompt |
-| **negative** | Negative prompt |
-| **Aspect Ratio** | Canvas ratio — *As Reference* reads from ref_0, *Custom* uses manual width/height |
-| **Megapixels** | Total pixel budget for the output canvas (1–4 MP) |
-| **Custom Width / Height** | Active only when Aspect Ratio is set to *Custom* |
-| **ref_0 … ref_3** | Reference images — slots appear automatically as you connect them |
-| **mask** | Optional inpaint mask (white = regenerate). Connecting it activates inpainting mode |
-| **Mask Expand** | Grows the mask outward by this many pixels |
-| **Mask Blur** | Softens mask edges after expansion |
-| **Inpaint Blend** | Controls the sharpness of the transition between painted and original areas |
-| **Use Detailing** | Crops and upscales the masked region before sampling for higher-detail inpainting |
-| **Detail Padding** | Padding in pixels around the mask bounding box when detailing is active |
-
-#### Outputs
-
-`model · positive · negative · latent · bundle`
-
----
+The starting point. You connect your model, prompts, and reference image here. It hands off everything the sampler needs.
 
 ### 😺NKD Klein Postsampling
 
-Receives the decoded image from VAEDecode and recomposes the final result.
+The end point. It takes the sampler's output and delivers the final image, putting everything back in its place when you've used inpainting or detailing.
 
-- If detailing was used, it pastes the high-detail crop back onto the original image at full resolution.
-- If inpainting was used without detailing, it composites the sampled region over the original.
-- Otherwise it passes the image through unchanged.
+**The chain looks like this:**
 
-#### Inputs
-
-| Input | Description |
-|---|---|
-| **image** | Decoded image from VAEDecode |
-| **bundle** | Bundle from NKD Klein Presampling |
-| **Uncrop Feather** | Feather radius when compositing the detailing crop back onto the background |
-
-#### Output
-
-`image`
+```
+NKD Klein Presampling → [your sampler chain] → NKD Klein Postsampling
+```
 
 ---
 
-## Modes
+## Inputs that matter
 
-The node detects the working mode automatically based on what you connect:
+### Image and prompt
 
-| Connected inputs | Mode |
-|---|---|
-| No ref image | Text-to-image |
-| ref_0 only | Image-to-image |
-| ref_0 + mask | Inpainting |
+- **ref_0** — your input image. The most important slot.
+- **ref_1, ref_2, …** — extra reference images. Slots appear automatically when you connect one, up to 8.
+
+### Output size
+
+- **Aspect Ratio** — the shape of the final image. *As Reference* matches your input image; *Custom* lets you set any size; or pick one of the named ratios.
+- **Megapixels** — how big the final image should be. Bigger = more detail, but slower.
+- **Custom Width / Custom Height** — only used when *Aspect Ratio* is set to *Custom*.
+
+### Inpainting (when you connect a mask)
+
+- **mask** — paint white over the area you want regenerated; black stays as-is.
+- **Mask Expand** — makes the painted area a bit bigger so the new content blends naturally with its surroundings.
+- **Mask Blur** — softens the mask edges for a smoother transition.
+- **Inpaint Blend** — `0` = clean cut along the mask edge, higher values fade the new and old together.
+
+### Detailing — for high-quality touch-ups
+
+- **Use Detailing** — turn this on to zoom into the masked area before regenerating it. Perfect for fixing faces, hands, eyes, small props. The result is composed back into the full image automatically.
+- **Detail Padding** — how much of the surrounding area to include in the zoom. More padding = the model sees more context; less padding = tighter focus on the masked zone.
+
+### Reference Strength — the creative dial
+
+This is the dial that controls how much creative freedom the model has versus how strictly it sticks to your reference image's layout.
+
+| Value | Behaviour | When to use |
+|---|---|---|
+| **`-3` to `-1`** | ⚠️ Mostly experimental. More freedom, looser interpretation | When you want bigger, more imaginative changes — the model reinterprets things more |
+| **`0`** *(default)* | Klein's official default behaviour — balanced | Good for most edits |
+| **`1` to `4`** | Mild anchor | When you want changes but the layout to stay close to the original |
+| **`5` to `7`** | Strong anchor | Tight alignment with the reference — useful for tile-based upscales or precise edits |
+| **`8` to `10`** | Almost locked to reference | When things absolutely have to line up pixel-for-pixel with the input |
+
+If you're getting unwanted drift between the original and the result (faces shifting, edges not quite aligning), bumping this up usually fixes it. If your generations feel too restrained or "stuck" close to the input, try negative values for more creative leeway.
+
+### Other
+
+- **Pin Model** — keeps the model loaded in your graphics card so it doesn't reload between runs. Faster, but only turn it on if you have plenty of VRAM.
+- **Bypass Reference** — turns off the model's ability to look at your reference image, so it behaves like a traditional image-to-image model instead. Leave it off in most cases.
+- **Uncrop Feather** *(Postsampling)* — softens the edge where a detailed zoom blends back into the rest of the image.
 
 ---
 
-## Reference images
+## Modes (auto-detected)
 
-Reference slots expand automatically — connect ref_0 and a second slot appears, connect that and a third appears, up to four references. You don't need to wire up any extra nodes; references are processed and injected into the conditioning internally.
+| What you connect | Mode |
+|---|---|
+| No reference image | Text-to-image |
+| Reference image only | Image-to-image |
+| Reference image + mask | Inpainting |
+| Reference image + mask + Use Detailing on | Inpainting with detail zoom |
+
+---
+
+## Quick recipes
+
+**Generate an image from scratch**
+1. Write a positive prompt.
+2. Pick an Aspect Ratio and Megapixels.
+3. Run.
+
+**Transform an image**
+1. Drop your image into `ref_0`.
+2. Write a prompt describing what you want changed.
+3. Run.
+
+**Edit a specific area of an image**
+1. Drop your image into `ref_0`.
+2. Paint a mask over the area you want to change and conect it to the mask socket.
+3. Write a prompt describing the change.
+4. Run.
+
+**Fix a face, hand or small detail at high quality**
+1. Drop your image into `ref_0`.
+2. Paint a mask over the small area and conect it to the mask socket.
+3. Turn on **Use Detailing**.
+4. Write a prompt describing what you want the detail to look like.
+5. Run.
+
+**Use multiple reference images for inspiration**
+1. Drop your main image into `ref_0`.
+2. As you connect, more slots will appear — add up to 8 reference images.
+3. Write a prompt and run.
 
 ---
 
@@ -93,15 +134,17 @@ NKD Flux Klein Loader
     ├── clip ───────────────────┤
     └── vae ────────────────────┤
                                 ▼
-Load Image ──────── ref_0   NKD Klein Presampling ──── model ──► NAGuidance
-SAM / Paint ─────── mask                          ──── positive ─►     │
+Load Image ──────── ref_0   NKD Klein Presampling ──── model ──► [your sampler]
+Mask Painter ────── mask                          ──── positive ─►     │
                                                   ──── negative ─►     │
-                                                  ──── latent ───► Sampler
-                                                  ──── bundle ───────────────────┐
-                                                                                 │
-                                                       VAEDecode ◄── Sampler     │
-                                                           │                     │
-                                                           └──► NKD Klein Postsampling ──► image
+                                                  ──── latent ───► [your sampler]
+                                                  ──── bundle ────────────────────┐
+                                                                                  │
+                                                       [your sampler] ──► VAEDecode
+                                                                                │
+                                                       NKD Klein Postsampling ◄──┘
+                                                              │
+                                                              └──► final image
 ```
 
 ---
@@ -110,7 +153,6 @@ SAM / Paint ─────── mask                          ──── pos
 
 - ComfyUI with Flux Klein model support
 - PyTorch ≥ 2.0
-- `kornia` (optional — accelerates mask expand on GPU; falls back automatically if not installed)
 
 ---
 
