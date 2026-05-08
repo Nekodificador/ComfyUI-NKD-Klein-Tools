@@ -289,25 +289,52 @@ def _grow_bbox_to_aspect(
     img_w: int, img_h: int,
     multiple: int = _VAE_MULTIPLE,
 ) -> Tuple[int, int, int, int]:
-    """Grow the bbox so its aspect ratio matches `target_aspect` exactly while
-    staying /multiple-aligned, centred on the original bbox, clamped to image
-    bounds. Always grows (never shrinks) to preserve all of the masked region."""
+    """Grow the bbox so its aspect ratio matches `target_aspect` while staying
+    /multiple-aligned, centred on the original bbox, clamped to image bounds.
+
+    If the requested grow would exceed the image on the growing axis, we cap
+    that axis to the image size and SHRINK the other axis instead so the final
+    bbox still matches target_aspect AND fits inside the image. The bbox might
+    end up smaller than the original mask region in that case — preferable to
+    returning an out-of-bounds bbox that would crash in _uncrop."""
     cur_w = x2 - x1
     cur_h = y2 - y1
     cur_aspect = cur_w / cur_h
 
+    # Cap the maximum bbox dimensions to the image (snapped down to /multiple
+    # so we stay aligned).
+    max_w = (img_w // multiple) * multiple
+    max_h = (img_h // multiple) * multiple
+
     if cur_aspect < target_aspect:
-        # bbox too tall → widen
+        # bbox too tall → try to widen first
         new_w_ideal = cur_h * target_aspect
         new_w = max(cur_w, int((new_w_ideal + multiple - 1) // multiple) * multiple)
         new_h = cur_h
+        if new_w > max_w:
+            # Image isn't wide enough — cap width and shrink height to match aspect.
+            new_w = max_w
+            new_h = max(multiple, int(new_w / target_aspect / multiple) * multiple)
+            if new_h > max_h:
+                new_h = max_h
+                new_w = max(multiple, int(new_h * target_aspect / multiple) * multiple)
     else:
-        # bbox too wide → make taller
+        # bbox too wide → try to grow taller first
         new_h_ideal = cur_w / target_aspect
         new_h = max(cur_h, int((new_h_ideal + multiple - 1) // multiple) * multiple)
         new_w = cur_w
+        if new_h > max_h:
+            new_h = max_h
+            new_w = max(multiple, int(new_h * target_aspect / multiple) * multiple)
+            if new_w > max_w:
+                new_w = max_w
+                new_h = max(multiple, int(new_w / target_aspect / multiple) * multiple)
 
-    # Re-centre on the original bbox centre, then snap to /multiple and clamp.
+    # Final safety clamp (should never trigger after the logic above).
+    new_w = min(new_w, max_w)
+    new_h = min(new_h, max_h)
+
+    # Re-centre on the original bbox centre, then clamp to image bounds.
     cx = (x1 + x2) // 2
     cy = (y1 + y2) // 2
     nx1 = (cx - new_w // 2) // multiple * multiple
@@ -317,11 +344,9 @@ def _grow_bbox_to_aspect(
     if ny1 < 0:
         ny1 = 0
     if nx1 + new_w > img_w:
-        nx1 = (img_w - new_w) // multiple * multiple
-        nx1 = max(0, nx1)
+        nx1 = max(0, (img_w - new_w) // multiple * multiple)
     if ny1 + new_h > img_h:
-        ny1 = (img_h - new_h) // multiple * multiple
-        ny1 = max(0, ny1)
+        ny1 = max(0, (img_h - new_h) // multiple * multiple)
     return nx1, ny1, nx1 + new_w, ny1 + new_h
 
 
@@ -380,6 +405,14 @@ def _crop_by_mask(
     target_aspect = render_w / render_h
     x1, y1, x2, y2 = _grow_bbox_to_aspect(x1, y1, x2, y2, target_aspect, ow, oh)
     crop_w, crop_h = x2 - x1, y2 - y1
+    # If the bbox couldn't grow to the target aspect (image too small on one
+    # axis), recompute the render to match the FINAL bbox aspect — the
+    # invariant we need is render_aspect == bbox_aspect, not bbox_aspect ==
+    # original target. This keeps _uncrop's resize symmetric and avoids
+    # crashing the composite when the bbox got capped to image bounds.
+    final_aspect = crop_w / crop_h
+    if abs(final_aspect - target_aspect) > 1e-6:
+        render_w, render_h = _pick_render_dims(crop_w, crop_h, target_pixels)
 
     cropped_raw = image[:, y1:y2, x1:x2, :]
     mask_raw = full_mask[:, y1:y2, x1:x2]
