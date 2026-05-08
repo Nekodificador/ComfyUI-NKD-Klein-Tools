@@ -33,6 +33,15 @@ function updateMaskWidgets(node) {
         if (connected) showWidget(widget);
         else hideWidget(widget);
     }
+    // When the mask is disconnected, force-disable use_detailing so its
+    // stored value can't trigger a crop on the next run with no mask.
+    if (!connected) {
+        const useDetailingWidget = node.widgets?.find(w => w.name === "use_detailing");
+        if (useDetailingWidget && useDetailingWidget.value === true) {
+            useDetailingWidget.value = false;
+            useDetailingWidget.callback?.(false);
+        }
+    }
     // detail_padding visibility also depends on use_detailing
     if (connected) updateDetailingWidgets(node);
     node.setSize(node.computeSize());

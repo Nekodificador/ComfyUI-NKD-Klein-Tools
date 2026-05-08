@@ -262,8 +262,12 @@ class NKDKleinPresampling(io.ComfyNode):
         # so the VAE consumes them without implicit padding. This keeps the patch's pixels
         # 1:1 with the source region — Postsampling pastes back without any resize when the
         # bbox fit the MP budget. The bbox uses processed_mask_native (same as composite).
+        # Detailing requires both an image AND a mask — the mask defines the
+        # zone to zoom into. Without a mask there's nothing to detail, so we
+        # silently ignore the toggle (it stays in stale state when the user
+        # disconnects a mask after enabling detailing).
         crop_img = crop_m = crop_box = orig_size = None
-        if use_detailing and has_image:
+        if use_detailing and has_image and has_mask:
             native_h, native_w = ref_0.shape[1], ref_0.shape[2]
             crop_img, crop_m, crop_box, _ = _crop_by_mask(
                 ref_0, processed_mask_native, detail_padding,
@@ -277,7 +281,7 @@ class NKDKleinPresampling(io.ComfyNode):
         # sits on the EXACT same pixel grid as the main latent — no extra
         # resize, no filter mismatch, no asymmetric scale drift.
         primary_latent = None
-        if use_detailing and crop_img is not None:
+        if crop_img is not None:
             primary_latent = vae.encode(crop_img[:, :, :, :3])
             if mode == "inpainting" and crop_m is not None:
                 nm = _resize_mask(crop_m, primary_latent.shape[3], primary_latent.shape[2])
