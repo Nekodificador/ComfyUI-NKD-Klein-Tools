@@ -224,20 +224,25 @@ class NKDKleinPresampling(io.ComfyNode):
         else:
             mode = "t2i"
 
-        # 2. Resolve canvas resolution
-        # Inpainting always derives ratio from ref_0 to match VAEEncode dimensions.
-        # For all other modes, use the aspect_ratio combo (which may also read ref_0
-        # when set to "As Reference").
-        if mode == "inpainting" and has_image:
-            width, height = _resolve_resolution(
-                "As Reference", megapixels, custom_width, custom_height, ref_image=ref_0
-            )
-        else:
-            width, height = _resolve_resolution(
-                aspect_ratio, megapixels, custom_width, custom_height, ref_image=ref_0
-            )
+        # 2. Resolve canvas resolution from the user's choice (Aspect Ratio +
+        # Megapixels). The mask is resampled to the canvas later, so the
+        # canvas dimensions don't need to match the source image exactly.
+        width, height = _resolve_resolution(
+            aspect_ratio, megapixels, custom_width, custom_height, ref_image=ref_0
+        )
 
-        # 3. Canvas-sized image (for VAEEncode / mask alignment / crop background)
+        # 3. Canvas-sized image (for VAEEncode / mask alignment / crop background).
+        # Detect when the canvas aspect differs from the source aspect — in
+        # img2img we then prefer to start from an empty latent rather than
+        # stretching the image, so the model composes the new aspect from the
+        # reference rather than baking the stretched proportions into the result.
+        aspect_mismatch = False
+        if has_image:
+            src_aspect = ref_0.shape[2] / ref_0.shape[1]
+            canvas_aspect = width / height
+            # 2% tolerance covers /16 quantisation drift.
+            if abs(src_aspect - canvas_aspect) / src_aspect > 0.02:
+                aspect_mismatch = True
         image_resized = _resize(ref_0, width, height) if has_image else None
 
         # 4. Process masks at canvas and native resolutions.
@@ -293,8 +298,17 @@ class NKDKleinPresampling(io.ComfyNode):
             nm = _resize_mask(processed_mask, primary_latent.shape[3], primary_latent.shape[2])
             latent = {"samples": primary_latent, "noise_mask": nm}
         elif mode == "img2img":
-            primary_latent = vae.encode(image_resized[:, :, :, :3])
-            latent = {"samples": primary_latent}
+            if aspect_mismatch:
+                # Aspect mismatch — start from an empty latent so the sampler
+                # composes the new canvas freshly (using ref_0 as a Klein
+                # reference for content), instead of denoising a stretched
+                # version of ref_0 that would bake the distortion into the
+                # result. Behaves like t2i for the latent, with the source
+                # image acting as visual guidance via the reference path.
+                latent = _make_empty_latent(width, height)
+            else:
+                primary_latent = vae.encode(image_resized[:, :, :, :3])
+                latent = {"samples": primary_latent}
         else:  # t2i
             latent = _make_empty_latent(width, height)
 
@@ -303,21 +317,16 @@ class NKDKleinPresampling(io.ComfyNode):
         # is True so the model runs as a standard img2img/inpainting without
         # Klein reference guidance.
         if not bypass_reference:
-            # Whenever we already encoded a primary_latent (detailing crop OR
-            # canvas-sized image for img2img/inpainting), re-use it as the
-            # primary reference. This keeps reference and main latent on the
-            # EXACT same pixel grid — same shape, same VAE pass — which matters
-            # most when reference_strength > 1: tighter ref_index_scale makes
-            # the model treat reference tokens as positional neighbours, and a
-            # mismatch in latent shape between reference and canvas surfaces as
-            # geometric breakage instead of just sub-pixel drift.
-            if primary_latent is not None:
+            # Re-use primary_latent as the reference whenever it shares a grid
+            # with the canvas (detailing, inpainting, img2img with matching
+            # aspect). Otherwise encode ref_0 independently at its native
+            # aspect — Klein handles references whose dimensions differ from
+            # the canvas natively, so no distortion gets baked into the
+            # output.
+            if primary_latent is not None and not aspect_mismatch:
                 pos = _apply_reference_latent(pos, primary_latent)
                 neg = _apply_reference_latent(neg, primary_latent)
             elif ref_0 is not None:
-                # t2i with a ref_0 (no main latent encoded): fall back to the
-                # 1MP-clamped encode path. Reference shape will not match the
-                # empty latent, but t2i has no main image to anchor anyway.
                 ref_latent = _encode_reference_latent(ref_0, vae)
                 pos = _apply_reference_latent(pos, ref_latent)
                 neg = _apply_reference_latent(neg, ref_latent)

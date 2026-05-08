@@ -146,23 +146,44 @@ def _scale_to_megapixels(width: int, height: int, target_pixels: int) -> Tuple[i
     """Scale (width, height) proportionally to ~target_pixels, /_VAE_MULTIPLE
     aligned, with minimum aspect-ratio drift.
 
-    Solves new_w * new_h = target_pixels with new_w/new_h = aspect, then snaps
-    each axis to the NEAREST /_VAE_MULTIPLE. Nearest-rounding (not always-up)
-    halves the worst-case quantisation drift versus _round_vae and keeps the
-    output aspect within ~0.1% of the source for typical tile dimensions.
+    Computes the ideal continuous dims, then evaluates the four /16-aligned
+    candidates (floor/ceil on each axis) and picks the one whose aspect ratio
+    is closest to the source. Nearest-rounding each axis independently can
+    drift up to ~0.6% on awkward aspects (e.g. 2560×1210 at 2MP) because
+    floor/ceil decisions on each axis are made in isolation; evaluating all
+    four combinations together finds the pair that preserves aspect within
+    /16 quantisation limits, typically below 0.15% drift even worst-case.
 
-    Important when this drives the Klein canvas resolution in tile workflows:
-    any aspect drift here compounds with Tile Merge's downscale-back-to-tile,
-    surfacing as visible sub-pixel drift on tile boundaries. The previous
-    implementation used _round_vae (round-up) on each axis independently,
-    producing up to ~1% drift on rectangular tiles like 1132×1224."""
+    Aspect drift here matters because it compounds with Tile Merge's
+    downscale-back-to-tile, surfacing as visible sub-pixel offset on tile
+    boundaries."""
     if width <= 0 or height <= 0:
         return _VAE_MULTIPLE, _VAE_MULTIPLE
     aspect = width / height
     new_h_ideal = (target_pixels / aspect) ** 0.5
     new_w_ideal = new_h_ideal * aspect
-    new_w = max(_VAE_MULTIPLE, int(round(new_w_ideal / _VAE_MULTIPLE)) * _VAE_MULTIPLE)
-    new_h = max(_VAE_MULTIPLE, int(round(new_h_ideal / _VAE_MULTIPLE)) * _VAE_MULTIPLE)
+
+    def _snap(v: float, mode: str) -> int:
+        q = v / _VAE_MULTIPLE
+        if mode == "floor":
+            n = int(q)
+        else:
+            n = int(q) + 1
+        return max(1, n) * _VAE_MULTIPLE
+
+    # Evaluate the four /16-aligned candidates and pick the one with the
+    # smallest aspect-ratio error. Ties broken by closest area to target.
+    candidates = []
+    for w_mode in ("floor", "ceil"):
+        for h_mode in ("floor", "ceil"):
+            cw = _snap(new_w_ideal, w_mode)
+            ch = _snap(new_h_ideal, h_mode)
+            cand_aspect = cw / ch
+            aspect_err = abs(cand_aspect - aspect) / aspect
+            area_err = abs(cw * ch - target_pixels) / target_pixels
+            candidates.append((aspect_err, area_err, cw, ch))
+    candidates.sort()
+    _, _, new_w, new_h = candidates[0]
     return new_w, new_h
 
 
