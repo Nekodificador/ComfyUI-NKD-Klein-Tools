@@ -35,6 +35,60 @@ def _resize_auto(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
     return _resize(image, width, height, mode="bicubic")
 
 
+def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int, mode: str) -> torch.Tensor:
+    """Fit `image` into a (width × height) canvas using the chosen strategy.
+
+    "stretch":   resize directly to (w, h), distorting the image when aspects differ.
+    "crop":      centre-crop to the canvas aspect, then resize.
+    "letterbox": fit the whole image inside, pad with black bars.
+    "compose":   not handled here — the caller decides to skip this entirely
+                 (typically by using an empty latent), so we fall back to a
+                 sensible passthrough (stretch) for the rare case it's called.
+    """
+    mode = (mode or "stretch").lower()
+    if image is None:
+        return None
+    _, ih, iw, c = image.shape
+    if iw == width and ih == height:
+        return image
+
+    src_aspect = iw / ih
+    dst_aspect = width / height
+
+    if mode == "letterbox":
+        # Fit entire image inside, pad with black.
+        if src_aspect > dst_aspect:
+            # Image wider than canvas → fit width, pad top/bottom.
+            new_w = width
+            new_h = max(1, int(round(width / src_aspect)))
+        else:
+            new_h = height
+            new_w = max(1, int(round(height * src_aspect)))
+        scaled = _resize_auto(image, new_w, new_h)
+        # Pad to (width, height) on a black background.
+        canvas = torch.zeros(image.shape[0], height, width, c, dtype=image.dtype, device=image.device)
+        y_off = (height - new_h) // 2
+        x_off = (width - new_w) // 2
+        canvas[:, y_off:y_off + new_h, x_off:x_off + new_w, :] = scaled
+        return canvas
+
+    if mode == "crop":
+        # Centre-crop the image to the canvas aspect, then resize.
+        if src_aspect > dst_aspect:
+            # Image wider → crop sides.
+            new_iw = max(1, int(round(ih * dst_aspect)))
+            x_off = (iw - new_iw) // 2
+            cropped = image[:, :, x_off:x_off + new_iw, :]
+        else:
+            new_ih = max(1, int(round(iw / dst_aspect)))
+            y_off = (ih - new_ih) // 2
+            cropped = image[:, y_off:y_off + new_ih, :, :]
+        return _resize_auto(cropped, width, height)
+
+    # "stretch" (and unknown modes) — direct resize, may distort.
+    return _resize(image, width, height)
+
+
 def _resize_mask(mask: torch.Tensor, width: int, height: int) -> torch.Tensor:
     if mask.dim() == 2:
         mask = mask.unsqueeze(0)
@@ -93,12 +147,30 @@ def _mask_grow(mask: torch.Tensor, expand: int, blur: int) -> torch.Tensor:
 # Resolution helpers
 # ---------------------------------------------------------------------------
 
+# Legacy combo values, kept for workflows saved before megapixels became a
+# float input. _megapixels_to_pixels handles both forms transparently.
 _MEGAPIXEL_OPTIONS = {
     "1 MP":  1_048_576,
     "2 MP":  2_097_152,
     "3 MP":  3_145_728,
     "4 MP":  4_194_304,
 }
+
+
+def _megapixels_to_pixels(value) -> int:
+    """Convert a megapixels input (float, int, or legacy string like '2 MP')
+    into an absolute pixel count. Accepts both new and legacy formats so
+    workflows saved with the old Combo widget still load."""
+    if isinstance(value, str):
+        legacy = _MEGAPIXEL_OPTIONS.get(value)
+        if legacy is not None:
+            return legacy
+        # Try to parse the leading number for unknown strings like "1.5 MP"
+        try:
+            return int(float(value.split()[0]) * 1_048_576)
+        except (ValueError, IndexError):
+            return _MEGAPIXEL_OPTIONS["1 MP"]
+    return int(float(value) * 1_048_576)
 
 # (w_parts, h_parts) for each named ratio — None means "derive from ref_0 or custom"
 _ASPECT_RATIO_OPTIONS = {
@@ -195,7 +267,7 @@ def _clamp_to_megapixel(width: int, height: int, target_pixels: int = 1_048_576)
 
 def _resolve_resolution(
     aspect_ratio: str,
-    megapixels: str,
+    megapixels,
     custom_width: int,
     custom_height: int,
     ref_image: Optional[torch.Tensor] = None,
@@ -206,8 +278,11 @@ def _resolve_resolution(
     "As Reference" → derive ratio from ref_image (falls back to Custom if no image).
     "Custom"       → use custom_width/custom_height, clamped to megapixel budget.
     Otherwise      → scale the named ratio to the MP target.
+
+    `megapixels` accepts a float (current) or a legacy string like "2 MP"
+    (workflows saved before the input became a float).
     """
-    target_pixels = _MEGAPIXEL_OPTIONS[megapixels]
+    target_pixels = _megapixels_to_pixels(megapixels)
 
     if aspect_ratio == "As Reference":
         if ref_image is not None:
@@ -225,10 +300,10 @@ def _resolve_resolution(
 
 def _resolve_resolution_from_image(
     image: torch.Tensor,
-    megapixels: str,
+    megapixels,
 ) -> Tuple[int, int]:
     """Derive canvas from ref_0's native aspect ratio scaled to the megapixel budget."""
-    target_pixels = _MEGAPIXEL_OPTIONS[megapixels]
+    target_pixels = _megapixels_to_pixels(megapixels)
     src_h, src_w = image.shape[1], image.shape[2]
     return _scale_to_megapixels(src_w, src_h, target_pixels)
 

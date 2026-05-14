@@ -1,5 +1,31 @@
 import { app } from "../../scripts/app.js";
 
+const LEGACY_MEGAPIXEL_MAP = {
+    "1 MP": 1.0,
+    "2 MP": 2.0,
+    "3 MP": 3.0,
+    "4 MP": 4.0,
+};
+
+function migrateLegacyMegapixels(node) {
+    const widget = node.widgets?.find(w => w.name === "megapixels");
+    if (!widget) return;
+    const v = widget.value;
+    if (typeof v === "string" && LEGACY_MEGAPIXEL_MAP[v] !== undefined) {
+        widget.value = LEGACY_MEGAPIXEL_MAP[v];
+        widget.callback?.(widget.value);
+        app.extensionManager?.toast?.add?.({
+            severity: "info",
+            summary: "NKD Klein Presampling",
+            detail:
+                "Megapixels is now a decimal value (0.1 – 4.0). Your saved " +
+                "value was migrated automatically — please review the node " +
+                "and adjust if needed.",
+            life: 8000,
+        });
+    }
+}
+
 const MASK_DEPENDENT_WIDGETS = [
     "mask_expand",
     "mask_blur",
@@ -91,6 +117,13 @@ app.registerExtension({
                 updateCustomSizeWidgets(this);
                 updateMaskWidgets(this);
             });
+        };
+
+        const origOnConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (info) {
+            origOnConfigure?.apply(this, arguments);
+            // Run after the widget values have been restored from the workflow.
+            requestAnimationFrame(() => migrateLegacyMegapixels(this));
         };
 
         const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;

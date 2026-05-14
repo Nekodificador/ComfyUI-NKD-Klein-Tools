@@ -12,12 +12,12 @@ from .helpers import (
     _encode_reference_latent,
     _apply_reference_latent,
     _resolve_resolution,
+    _megapixels_to_pixels,
+    _fit_image_to_canvas,
     _ASPECT_RATIO_OPTIONS,
-    _MEGAPIXEL_OPTIONS,
 )
 
 _ASPECT_RATIO_KEYS = list(_ASPECT_RATIO_OPTIONS.keys())
-_MEGAPIXEL_KEYS    = list(_MEGAPIXEL_OPTIONS.keys())
 
 
 class NKDKleinPresampling(io.ComfyNode):
@@ -61,13 +61,12 @@ class NKDKleinPresampling(io.ComfyNode):
                         "size you want."
                     ),
                     display_name="Aspect Ratio"),
-                io.Combo.Input("megapixels",
-                    options=_MEGAPIXEL_KEYS,
-                    default="1 MP",
+                io.Float.Input("megapixels",
+                    default=1.0, min=0.1, max=4.0, step=0.1,
                     tooltip=(
-                        "How big the final image should be. Bigger values mean more "
-                        "detail and sharper results, but also slower generation and "
-                        "more VRAM needed."
+                        "How big the final image should be, in megapixels. "
+                        "Bigger values mean more detail and sharper results, "
+                        "but also slower generation and more VRAM needed."
                     ),
                     display_name="Megapixels"),
                 io.Int.Input("custom_width",  default=1024, min=64, max=8192, step=8,
@@ -76,6 +75,23 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Int.Input("custom_height", default=1024, min=64, max=8192, step=8,
                     tooltip="Height in pixels. Only used when Aspect Ratio is set to Custom.",
                     display_name="Custom Height"),
+
+                io.Combo.Input("image_fit",
+                    options=["Native", "Center Crop", "Outpaint"],
+                    default="Native",
+                    tooltip=(
+                        "How to handle your input image when the chosen canvas "
+                        "has a different shape. Only matters when the canvas "
+                        "shape doesn't match the image. "
+                        "Native: the model rebuilds the canvas around your "
+                        "subject without distorting it (best for changing aspect "
+                        "ratio or upscaling). "
+                        "Center Crop: cuts the image to fit the canvas (no "
+                        "distortion, loses the edges). "
+                        "Outpaint: fits the whole image inside the canvas and "
+                        "lets the model fill in the surrounding space."
+                    ),
+                    display_name="Image Fit"),
 
                 # ---- mode overrides ----
                 io.Boolean.Input("bypass_reference", default=False,
@@ -187,9 +203,10 @@ class NKDKleinPresampling(io.ComfyNode):
         positive: str,
         negative: str,
         aspect_ratio: str,
-        megapixels: str,
+        megapixels,
         custom_width: int,
         custom_height: int,
+        image_fit: str,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
         mask_expand: int = 20,
@@ -233,9 +250,11 @@ class NKDKleinPresampling(io.ComfyNode):
 
         # 3. Canvas-sized image (for VAEEncode / mask alignment / crop background).
         # Detect when the canvas aspect differs from the source aspect — in
-        # img2img we then prefer to start from an empty latent rather than
-        # stretching the image, so the model composes the new aspect from the
-        # reference rather than baking the stretched proportions into the result.
+        # that case the user's `image_fit` choice decides how to handle the
+        # mismatch. "Compose" routes the sampler through an empty latent
+        # (the model recomposes the new canvas around the reference), so
+        # image_resized isn't used for the latent in that case. The other
+        # modes produce a canvas-sized image with the chosen fit strategy.
         aspect_mismatch = False
         if has_image:
             src_aspect = ref_0.shape[2] / ref_0.shape[1]
@@ -243,7 +262,21 @@ class NKDKleinPresampling(io.ComfyNode):
             # 2% tolerance covers /16 quantisation drift.
             if abs(src_aspect - canvas_aspect) / src_aspect > 0.02:
                 aspect_mismatch = True
-        image_resized = _resize(ref_0, width, height) if has_image else None
+
+        if has_image:
+            if not aspect_mismatch or image_fit == "Native":
+                # Aspect matches OR Native mode — direct resize is fine
+                # (Native uses an empty latent in the sampler path anyway,
+                # so this value is mostly inert for that mode).
+                image_resized = _resize(ref_0, width, height)
+            elif image_fit == "Center Crop":
+                image_resized = _fit_image_to_canvas(ref_0, width, height, "crop")
+            elif image_fit == "Outpaint":
+                image_resized = _fit_image_to_canvas(ref_0, width, height, "letterbox")
+            else:
+                image_resized = _resize(ref_0, width, height)
+        else:
+            image_resized = None
 
         # 4. Process masks at canvas and native resolutions.
         # processed_mask_native is built directly from the raw mask (resize → grow →
@@ -276,7 +309,7 @@ class NKDKleinPresampling(io.ComfyNode):
             native_h, native_w = ref_0.shape[1], ref_0.shape[2]
             crop_img, crop_m, crop_box, _ = _crop_by_mask(
                 ref_0, processed_mask_native, detail_padding,
-                _MEGAPIXEL_OPTIONS[megapixels],
+                _megapixels_to_pixels(megapixels),
             )
             orig_size = (native_h, native_w)
 
@@ -298,15 +331,15 @@ class NKDKleinPresampling(io.ComfyNode):
             nm = _resize_mask(processed_mask, primary_latent.shape[3], primary_latent.shape[2])
             latent = {"samples": primary_latent, "noise_mask": nm}
         elif mode == "img2img":
-            if aspect_mismatch:
-                # Aspect mismatch — start from an empty latent so the sampler
-                # composes the new canvas freshly (using ref_0 as a Klein
-                # reference for content), instead of denoising a stretched
-                # version of ref_0 that would bake the distortion into the
-                # result. Behaves like t2i for the latent, with the source
-                # image acting as visual guidance via the reference path.
+            if aspect_mismatch and image_fit == "Native":
+                # Native: empty latent so the sampler recomposes the new
+                # canvas freshly around the reference (no stretched proportions
+                # baked into the result). Source image still acts as visual
+                # guidance via the reference path.
                 latent = _make_empty_latent(width, height)
             else:
+                # Aspect matches OR the user chose Center Crop / Outpaint:
+                # image_resized already carries the chosen fit strategy.
                 primary_latent = vae.encode(image_resized[:, :, :, :3])
                 latent = {"samples": primary_latent}
         else:  # t2i
@@ -317,13 +350,16 @@ class NKDKleinPresampling(io.ComfyNode):
         # is True so the model runs as a standard img2img/inpainting without
         # Klein reference guidance.
         if not bypass_reference:
-            # Re-use primary_latent as the reference whenever it shares a grid
-            # with the canvas (detailing, inpainting, img2img with matching
-            # aspect). Otherwise encode ref_0 independently at its native
-            # aspect — Klein handles references whose dimensions differ from
-            # the canvas natively, so no distortion gets baked into the
-            # output.
-            if primary_latent is not None and not aspect_mismatch:
+            # Re-use primary_latent as the reference whenever it exists and
+            # shares its grid with the canvas. That covers detailing,
+            # inpainting, img2img with matching aspect, AND img2img with
+            # mismatch when the user chose Crop/Letterbox/Stretch (those
+            # produce a canvas-sized image that is also a sensible reference).
+            # Only the Compose path encodes ref_0 independently at its
+            # native aspect — Klein handles references whose dimensions
+            # differ from the canvas natively, so no distortion gets baked
+            # into the output.
+            if primary_latent is not None:
                 pos = _apply_reference_latent(pos, primary_latent)
                 neg = _apply_reference_latent(neg, primary_latent)
             elif ref_0 is not None:

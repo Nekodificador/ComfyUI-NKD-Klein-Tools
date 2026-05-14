@@ -6,6 +6,18 @@ A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. P
 
 ---
 
+## What's new in 1.7.0
+
+- **Megapixels is now a slider** with decimal precision (0.1 – 4.0) instead of a dropdown with fixed steps. You can pick any size that suits your needs.
+- **New *Image Fit* control** — decide how the input image should be handled when the canvas you chose has a different shape than the image:
+  - **Native** *(default)*: the model rebuilds the canvas around your subject without distorting it. Best for changing aspect ratio or tile-based workflows.
+  - **Center Crop**: cuts the image to fit the canvas (centered, no distortion, loses the edges).
+  - **Outpaint**: fits the whole image inside the canvas and lets the model fill in the surrounding space.
+
+> ⚠️ **Heads up if you're upgrading from an older version:** the *Megapixels* widget changed from a dropdown to a numeric slider. Workflows saved with the old version will load fine — the value is migrated automatically and a notification will let you know — but it's a good idea to open the node and double-check the value is what you want.
+
+---
+
 ## What you can do with it
 
 - **Generate images from a prompt** — just connect the model and write what you want.
@@ -70,7 +82,7 @@ This is the dial that controls how much creative freedom the model has versus ho
 | **`-3` to `-1`** | ⚠️ Mostly experimental. More freedom, looser interpretation | When you want bigger, more imaginative changes — the model reinterprets things more |
 | **`0`** *(default)* | Klein's official default behaviour — balanced | Good for most edits |
 | **`1` to `4`** | Mild anchor | When you want changes but the layout to stay close to the original |
-| **`5` to `7`** | Strong anchor | Tight alignment with the reference — useful for tile-based upscales or precise edits |
+| **`5` to `7`** | Strong anchor | Tight alignment with the reference — useful for upscales or precise edits |
 | **`8` to `10`** | Almost locked to reference | When things absolutely have to line up pixel-for-pixel with the input |
 
 If you're getting unwanted drift between the original and the result (faces shifting, edges not quite aligning), bumping this up usually fixes it. If your generations feel too restrained or "stuck" close to the input, try negative values for more creative leeway.
