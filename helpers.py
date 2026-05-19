@@ -35,12 +35,57 @@ def _resize_auto(image: torch.Tensor, width: int, height: int) -> torch.Tensor:
     return _resize(image, width, height, mode="bicubic")
 
 
-def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int, mode: str) -> torch.Tensor:
+def _outpaint_fill(canvas: torch.Tensor, content: torch.Tensor,
+                   y_off: int, x_off: int, new_h: int, new_w: int,
+                   fill: str) -> torch.Tensor:
+    """Fill the empty border of an outpaint canvas around the placed content.
+
+    fill: "black" | "white" | "gray" | "smart"
+      black / white / gray  — flat colour around the content.
+      smart                 — content-aware fill (cv2 Telea) so the model is
+                              given a plausible continuation of the scene
+                              rather than a hard colour edge; falls back to
+                              gray when OpenCV is unavailable.
+    """
+    fill = (fill or "black").lower()
+    _, H, W, _ = canvas.shape
+
+    if fill == "smart":
+        try:
+            import cv2
+            import numpy as np
+            out = canvas[0].clamp(0, 1).cpu().numpy()
+            out[y_off:y_off + new_h, x_off:x_off + new_w, :] = (
+                content[0].clamp(0, 1).cpu().numpy()
+            )
+            mask = np.ones((H, W), dtype=np.uint8) * 255
+            mask[y_off:y_off + new_h, x_off:x_off + new_w] = 0
+            rgb8 = (out[:, :, :3] * 255.0).astype(np.uint8)
+            filled = cv2.inpaint(rgb8, mask, 8, cv2.INPAINT_TELEA)
+            res = out.copy()
+            res[:, :, :3] = filled.astype(np.float32) / 255.0
+            return torch.from_numpy(res).unsqueeze(0).to(canvas.dtype).to(canvas.device)
+        except Exception:
+            fill = "gray"  # fall through to flat fill
+
+    if fill == "white":
+        base = torch.ones_like(canvas)
+    elif fill == "gray":
+        base = torch.full_like(canvas, 0.5)
+    else:  # black (default)
+        base = torch.zeros_like(canvas)
+    base[:, y_off:y_off + new_h, x_off:x_off + new_w, :] = content
+    return base
+
+
+def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int,
+                         mode: str, fill: str = "black") -> torch.Tensor:
     """Fit `image` into a (width × height) canvas using the chosen strategy.
 
     "stretch":   resize directly to (w, h), distorting the image when aspects differ.
     "crop":      centre-crop to the canvas aspect, then resize.
-    "letterbox": fit the whole image inside, pad with black bars.
+    "letterbox": fit the whole image inside, pad the border using `fill`
+                 ("black" | "white" | "gray" | "smart").
     "compose":   not handled here — the caller decides to skip this entirely
                  (typically by using an empty latent), so we fall back to a
                  sensible passthrough (stretch) for the rare case it's called.
@@ -56,7 +101,7 @@ def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int, mode: str
     dst_aspect = width / height
 
     if mode == "letterbox":
-        # Fit entire image inside, pad with black.
+        # Fit entire image inside, pad the border with the chosen fill.
         if src_aspect > dst_aspect:
             # Image wider than canvas → fit width, pad top/bottom.
             new_w = width
@@ -65,12 +110,11 @@ def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int, mode: str
             new_h = height
             new_w = max(1, int(round(height * src_aspect)))
         scaled = _resize_auto(image, new_w, new_h)
-        # Pad to (width, height) on a black background.
-        canvas = torch.zeros(image.shape[0], height, width, c, dtype=image.dtype, device=image.device)
+        canvas = torch.zeros(image.shape[0], height, width, c,
+                             dtype=image.dtype, device=image.device)
         y_off = (height - new_h) // 2
         x_off = (width - new_w) // 2
-        canvas[:, y_off:y_off + new_h, x_off:x_off + new_w, :] = scaled
-        return canvas
+        return _outpaint_fill(canvas, scaled, y_off, x_off, new_h, new_w, fill)
 
     if mode == "crop":
         # Centre-crop the image to the canvas aspect, then resize.

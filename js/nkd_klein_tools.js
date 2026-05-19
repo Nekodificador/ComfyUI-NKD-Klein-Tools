@@ -51,6 +51,40 @@ function isMaskConnected(node) {
     return maskInput ? maskInput.link !== null : false;
 }
 
+// True when any ref_* (Autogrow) input slot has a link.
+function isRefConnected(node) {
+    if (!node.inputs) return false;
+    return node.inputs.some(
+        i => i.name && i.name.startsWith("ref_") && i.link !== null
+    );
+}
+
+// image_fit / bypass_reference / reference_strength only do anything when a
+// reference image is connected — hide them otherwise to keep the node clean.
+const REF_DEPENDENT_WIDGETS = [
+    "image_fit",
+    "bypass_reference",
+    "reference_strength",
+];
+
+function updateRefDependentWidgets(node) {
+    const connected = isRefConnected(node);
+    for (const name of REF_DEPENDENT_WIDGETS) {
+        const widget = node.widgets?.find(w => w.name === name);
+        if (!widget) continue;
+        if (connected) showWidget(widget);
+        else hideWidget(widget);
+    }
+    // outpaint_fill depends on image_fit, which is itself ref-dependent.
+    if (connected) updateOutpaintFillWidget(node);
+    else {
+        const fillWidget = node.widgets?.find(w => w.name === "outpaint_fill");
+        if (fillWidget) hideWidget(fillWidget);
+    }
+    node.setSize(node.computeSize());
+    node.setDirtyCanvas(true, true);
+}
+
 function updateMaskWidgets(node) {
     const connected = isMaskConnected(node);
     for (const name of MASK_DEPENDENT_WIDGETS) {
@@ -104,6 +138,17 @@ function updateCustomSizeWidgets(node) {
     node.setDirtyCanvas(true, true);
 }
 
+function updateOutpaintFillWidget(node) {
+    const fitWidget  = node.widgets?.find(w => w.name === "image_fit");
+    const fillWidget = node.widgets?.find(w => w.name === "outpaint_fill");
+    if (!fitWidget || !fillWidget) return;
+
+    if (fitWidget.value === "Outpaint") showWidget(fillWidget);
+    else hideWidget(fillWidget);
+    node.setSize(node.computeSize());
+    node.setDirtyCanvas(true, true);
+}
+
 app.registerExtension({
     name: "nkd.klein_tools",
 
@@ -115,6 +160,7 @@ app.registerExtension({
             origOnCreated?.apply(this, arguments);
             requestAnimationFrame(() => {
                 updateCustomSizeWidgets(this);
+                updateRefDependentWidgets(this);
                 updateMaskWidgets(this);
             });
         };
@@ -123,7 +169,10 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function (info) {
             origOnConfigure?.apply(this, arguments);
             // Run after the widget values have been restored from the workflow.
-            requestAnimationFrame(() => migrateLegacyMegapixels(this));
+            requestAnimationFrame(() => {
+                migrateLegacyMegapixels(this);
+                updateRefDependentWidgets(this);
+            });
         };
 
         const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
@@ -131,12 +180,18 @@ app.registerExtension({
             origOnWidgetChanged?.apply(this, arguments);
             if (name === "aspect_ratio")  updateCustomSizeWidgets(this);
             if (name === "use_detailing") updateDetailingWidgets(this);
+            if (name === "image_fit")     updateOutpaintFillWidget(this);
         };
 
         const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
             origOnConnectionsChange?.apply(this, arguments);
-            if (type === 1) updateMaskWidgets(this);
+            // type 1 = input connection change. Refresh both the mask-driven
+            // widgets and the ref-driven ones (ref_* slots are Autogrow inputs).
+            if (type === 1) {
+                updateMaskWidgets(this);
+                updateRefDependentWidgets(this);
+            }
         };
     },
 });

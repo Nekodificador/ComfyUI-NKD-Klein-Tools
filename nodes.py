@@ -92,6 +92,18 @@ class NKDKleinPresampling(io.ComfyNode):
                         "lets the model fill in the surrounding space."
                     ),
                     display_name="Image Fit"),
+                io.Combo.Input("outpaint_fill",
+                    options=["Gray", "Black", "White", "Smart"],
+                    default="Gray",
+                    tooltip=(
+                        "What to put in the empty space around your image when "
+                        "using Outpaint. Gray is neutral and lets the model "
+                        "decide freely. Black or White nudge it toward dark or "
+                        "bright surroundings. Smart fills the space with a soft "
+                        "continuation of the image so the model has a natural "
+                        "starting point. Only used with Outpaint."
+                    ),
+                    display_name="Outpaint Fill"),
 
                 # ---- mode overrides ----
                 io.Boolean.Input("bypass_reference", default=False,
@@ -191,6 +203,13 @@ class NKDKleinPresampling(io.ComfyNode):
                         "The mask after expanding and softening — useful if a "
                         "downstream node needs to know which area was regenerated."
                     )),
+                io.Image.Output("ref_0", display_name="ref_0",
+                    tooltip=(
+                        "Your input image after the Image Fit / Outpaint "
+                        "preprocessing, at the final canvas size. Handy to "
+                        "feed into other parts of the workflow that need the "
+                        "same prepared image."
+                    )),
             ],
         )
 
@@ -207,6 +226,7 @@ class NKDKleinPresampling(io.ComfyNode):
         custom_width: int,
         custom_height: int,
         image_fit: str,
+        outpaint_fill: str,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
         mask_expand: int = 20,
@@ -272,11 +292,28 @@ class NKDKleinPresampling(io.ComfyNode):
             elif image_fit == "Center Crop":
                 image_resized = _fit_image_to_canvas(ref_0, width, height, "crop")
             elif image_fit == "Outpaint":
-                image_resized = _fit_image_to_canvas(ref_0, width, height, "letterbox")
+                image_resized = _fit_image_to_canvas(
+                    ref_0, width, height, "letterbox", fill=outpaint_fill.lower()
+                )
             else:
                 image_resized = _resize(ref_0, width, height)
         else:
             image_resized = None
+
+        # Canvas-sized preview of what the sampler actually works from. Emitted
+        # as the `ref_0` output so the preprocessed image can be reused later
+        # in the pipeline. In Native + aspect-mismatch the sampler starts from
+        # an empty latent (the model recomposes), so there is no real "fitted"
+        # image — we emit a non-distorted gray letterbox there as an honest
+        # representation rather than the stretched image_resized.
+        if not has_image:
+            ref_0_out = None
+        elif aspect_mismatch and image_fit == "Native":
+            ref_0_out = _fit_image_to_canvas(
+                ref_0, width, height, "letterbox", fill="gray"
+            )
+        else:
+            ref_0_out = image_resized
 
         # 4. Process masks at canvas and native resolutions.
         # processed_mask_native is built directly from the raw mask (resize → grow →
@@ -446,7 +483,11 @@ class NKDKleinPresampling(io.ComfyNode):
             processed_mask if processed_mask is not None
             else torch.zeros(1, height, width, dtype=torch.float32)
         )
-        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask)
+        # ref_0 output — never None (t2i has no input image, emit a black
+        # canvas-sized tensor so the socket type stays consistent).
+        if ref_0_out is None:
+            ref_0_out = torch.zeros(1, height, width, 3, dtype=torch.float32)
+        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask, ref_0_out)
 
 
 def _make_empty_latent(width: int, height: int) -> dict:

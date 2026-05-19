@@ -6,13 +6,15 @@ A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. P
 
 ---
 
-## What's new in 1.7.0
+## What's new in 1.7.x
 
 - **Megapixels is now a slider** with decimal precision (0.1 – 4.0) instead of a dropdown with fixed steps. You can pick any size that suits your needs.
 - **New *Image Fit* control** — decide how the input image should be handled when the canvas you chose has a different shape than the image:
   - **Native** *(default)*: the model rebuilds the canvas around your subject without distorting it. Best for changing aspect ratio or tile-based workflows.
   - **Center Crop**: cuts the image to fit the canvas (centered, no distortion, loses the edges).
   - **Outpaint**: fits the whole image inside the canvas and lets the model fill in the surrounding space.
+- **New *Outpaint Fill*** — when using Outpaint, choose what goes in the empty space: **Gray** (neutral, default), **Black**, **White**, or **Smart** (a soft continuation of your image so the model has a natural starting point).
+- **New `ref_0` output** — your input image after the Image Fit / Outpaint preprocessing, at the final canvas size. Reuse it anywhere else in your workflow.
 
 > ⚠️ **Heads up if you're upgrading from an older version:** the *Megapixels* widget changed from a dropdown to a numeric slider. Workflows saved with the old version will load fine — the value is migrated automatically and a notification will let you know — but it's a good idea to open the node and double-check the value is what you want.
 
