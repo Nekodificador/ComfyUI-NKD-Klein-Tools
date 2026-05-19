@@ -79,7 +79,8 @@ def _outpaint_fill(canvas: torch.Tensor, content: torch.Tensor,
 
 
 def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int,
-                         mode: str, fill: str = "black") -> torch.Tensor:
+                         mode: str, fill: str = "black",
+                         slide: float = 0.5) -> torch.Tensor:
     """Fit `image` into a (width × height) canvas using the chosen strategy.
 
     "stretch":   resize directly to (w, h), distorting the image when aspects differ.
@@ -89,6 +90,11 @@ def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int,
     "compose":   not handled here — the caller decides to skip this entirely
                  (typically by using an empty latent), so we fall back to a
                  sensible passthrough (stretch) for the rare case it's called.
+
+    `slide` (0.0–1.0, default 0.5 = centred) positions the image within the
+    leftover space of the letterbox. The affected axis depends on the aspect
+    mismatch: a taller canvas slides vertically, a wider canvas slides
+    horizontally. Convention: 0 = bottom / left, 1 = top / right.
     """
     mode = (mode or "stretch").lower()
     if image is None:
@@ -112,20 +118,35 @@ def _fit_image_to_canvas(image: torch.Tensor, width: int, height: int,
         scaled = _resize_auto(image, new_w, new_h)
         canvas = torch.zeros(image.shape[0], height, width, c,
                              dtype=image.dtype, device=image.device)
-        y_off = (height - new_h) // 2
-        x_off = (width - new_w) // 2
+        slide = min(1.0, max(0.0, float(slide)))
+        space_y = height - new_h
+        space_x = width - new_w
+        # Y axis: 1 = top (offset 0), 0 = bottom (offset = space).
+        y_off = int(round((1.0 - slide) * space_y)) if space_y > 0 else 0
+        # X axis: 0 = left (offset 0), 1 = right (offset = space).
+        x_off = int(round(slide * space_x)) if space_x > 0 else 0
         return _outpaint_fill(canvas, scaled, y_off, x_off, new_h, new_w, fill)
 
     if mode == "crop":
-        # Centre-crop the image to the canvas aspect, then resize.
+        # Crop the image to the canvas aspect, then resize. `slide` keeps the
+        # SAME mental model as letterbox: it slides the *image* inside the
+        # canvas window. So in crop the visible strip is the OPPOSITE of the
+        # slide direction — sliding the image right (slide=1) reveals its
+        # left side; sliding it up (slide=1) reveals its bottom.
+        #   X axis  slide 1 = show left,   slide 0 = show right
+        #   Y axis  slide 1 = show bottom, slide 0 = show top
+        slide = min(1.0, max(0.0, float(slide)))
         if src_aspect > dst_aspect:
-            # Image wider → crop sides.
+            # Image wider → crop sides (horizontal slide).
             new_iw = max(1, int(round(ih * dst_aspect)))
-            x_off = (iw - new_iw) // 2
+            space_x = iw - new_iw
+            x_off = int(round((1.0 - slide) * space_x)) if space_x > 0 else 0
             cropped = image[:, :, x_off:x_off + new_iw, :]
         else:
+            # Image taller → crop top/bottom (vertical slide).
             new_ih = max(1, int(round(iw / dst_aspect)))
-            y_off = (ih - new_ih) // 2
+            space_y = ih - new_ih
+            y_off = int(round(slide * space_y)) if space_y > 0 else 0
             cropped = image[:, y_off:y_off + new_ih, :, :]
         return _resize_auto(cropped, width, height)
 

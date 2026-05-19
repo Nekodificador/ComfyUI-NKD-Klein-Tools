@@ -104,6 +104,18 @@ class NKDKleinPresampling(io.ComfyNode):
                         "starting point. Only used with Outpaint."
                     ),
                     display_name="Outpaint Fill"),
+                io.Float.Input("slide",
+                    default=0.5, min=0.0, max=1.0, step=0.01,
+                    tooltip=(
+                        "Shifts the image off-centre. With Outpaint it moves "
+                        "the image within the empty space; with Center Crop it "
+                        "chooses which part of the image is kept. 0.5 stays "
+                        "centred. The direction follows the canvas shape: a "
+                        "taller canvas moves it up (toward 1) or down (toward "
+                        "0); a wider canvas moves it right (toward 1) or left "
+                        "(toward 0). Used with Outpaint and Center Crop."
+                    ),
+                    display_name="Slide"),
 
                 # ---- mode overrides ----
                 io.Boolean.Input("bypass_reference", default=False,
@@ -227,6 +239,7 @@ class NKDKleinPresampling(io.ComfyNode):
         custom_height: int,
         image_fit: str,
         outpaint_fill: str,
+        slide: float,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
         mask_expand: int = 20,
@@ -290,10 +303,13 @@ class NKDKleinPresampling(io.ComfyNode):
                 # so this value is mostly inert for that mode).
                 image_resized = _resize(ref_0, width, height)
             elif image_fit == "Center Crop":
-                image_resized = _fit_image_to_canvas(ref_0, width, height, "crop")
+                image_resized = _fit_image_to_canvas(
+                    ref_0, width, height, "crop", slide=slide
+                )
             elif image_fit == "Outpaint":
                 image_resized = _fit_image_to_canvas(
-                    ref_0, width, height, "letterbox", fill=outpaint_fill.lower()
+                    ref_0, width, height, "letterbox",
+                    fill=outpaint_fill.lower(), slide=slide,
                 )
             else:
                 image_resized = _resize(ref_0, width, height)
@@ -310,7 +326,7 @@ class NKDKleinPresampling(io.ComfyNode):
             ref_0_out = None
         elif aspect_mismatch and image_fit == "Native":
             ref_0_out = _fit_image_to_canvas(
-                ref_0, width, height, "letterbox", fill="gray"
+                ref_0, width, height, "letterbox", fill="gray", slide=slide
             )
         else:
             ref_0_out = image_resized

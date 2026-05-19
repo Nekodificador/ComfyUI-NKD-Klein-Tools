@@ -14,6 +14,7 @@ A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. P
   - **Center Crop**: cuts the image to fit the canvas (centered, no distortion, loses the edges).
   - **Outpaint**: fits the whole image inside the canvas and lets the model fill in the surrounding space.
 - **New *Outpaint Fill*** — when using Outpaint, choose what goes in the empty space: **Gray** (neutral, default), **Black**, **White**, or **Smart** (a soft continuation of your image so the model has a natural starting point).
+- **New *Slide* control** — shift the image off-centre instead of always centering it. With **Outpaint** it moves the image within the empty space; with **Center Crop** it chooses which part of the image is kept. `0.5` stays centered; the direction follows the canvas shape (a taller canvas slides it up/down, a wider canvas slides it left/right).
 - **New `ref_0` output** — your input image after the Image Fit / Outpaint preprocessing, at the final canvas size. Reuse it anywhere else in your workflow.
 
 > ⚠️ **Heads up if you're upgrading from an older version:** the *Megapixels* widget changed from a dropdown to a numeric slider. Workflows saved with the old version will load fine — the value is migrated automatically and a notification will let you know — but it's a good idea to open the node and double-check the value is what you want.

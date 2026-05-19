@@ -75,11 +75,13 @@ function updateRefDependentWidgets(node) {
         if (connected) showWidget(widget);
         else hideWidget(widget);
     }
-    // outpaint_fill depends on image_fit, which is itself ref-dependent.
+    // outpaint_fill / slide depend on image_fit, which is itself ref-dependent.
     if (connected) updateOutpaintFillWidget(node);
     else {
-        const fillWidget = node.widgets?.find(w => w.name === "outpaint_fill");
-        if (fillWidget) hideWidget(fillWidget);
+        for (const n of ["outpaint_fill", "slide"]) {
+            const w = node.widgets?.find(x => x.name === n);
+            if (w) hideWidget(w);
+        }
     }
     node.setSize(node.computeSize());
     node.setDirtyCanvas(true, true);
@@ -139,12 +141,22 @@ function updateCustomSizeWidgets(node) {
 }
 
 function updateOutpaintFillWidget(node) {
-    const fitWidget  = node.widgets?.find(w => w.name === "image_fit");
-    const fillWidget = node.widgets?.find(w => w.name === "outpaint_fill");
-    if (!fitWidget || !fillWidget) return;
+    const fitWidget   = node.widgets?.find(w => w.name === "image_fit");
+    const fillWidget  = node.widgets?.find(w => w.name === "outpaint_fill");
+    const slideWidget = node.widgets?.find(w => w.name === "slide");
+    if (!fitWidget) return;
 
-    if (fitWidget.value === "Outpaint") showWidget(fillWidget);
-    else hideWidget(fillWidget);
+    const fit = fitWidget.value;
+    // outpaint_fill only matters for Outpaint.
+    if (fillWidget) {
+        if (fit === "Outpaint") showWidget(fillWidget);
+        else hideWidget(fillWidget);
+    }
+    // slide matters for both Outpaint and Center Crop.
+    if (slideWidget) {
+        if (fit === "Outpaint" || fit === "Center Crop") showWidget(slideWidget);
+        else hideWidget(slideWidget);
+    }
     node.setSize(node.computeSize());
     node.setDirtyCanvas(true, true);
 }
