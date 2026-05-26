@@ -161,49 +161,93 @@ function updateOutpaintFillWidget(node) {
     node.setDirtyCanvas(true, true);
 }
 
+// Postsampling — auto-detect advanced widgets only matter when the toggle is on.
+const AUTO_DETECT_DEPENDENT_WIDGETS = [
+    "edge_softness",
+    "region_padding",
+    "fill_inner_gaps",
+    "extend_to_borders",
+];
+
+function updateAutoDetectWidgets(node) {
+    const toggle = node.widgets?.find(w => w.name === "auto_detect_edit_region");
+    if (!toggle) return;
+    const on = toggle.value === true;
+    for (const name of AUTO_DETECT_DEPENDENT_WIDGETS) {
+        const widget = node.widgets?.find(w => w.name === name);
+        if (!widget) continue;
+        if (on) showWidget(widget);
+        else hideWidget(widget);
+    }
+    node.setSize(node.computeSize());
+    node.setDirtyCanvas(true, true);
+}
+
 app.registerExtension({
     name: "nkd.klein_tools",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== "NKDKleinPresampling") return;
+        if (nodeData.name === "NKDKleinPresampling") {
+            const origOnCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                origOnCreated?.apply(this, arguments);
+                requestAnimationFrame(() => {
+                    updateCustomSizeWidgets(this);
+                    updateRefDependentWidgets(this);
+                    updateMaskWidgets(this);
+                });
+            };
 
-        const origOnCreated = nodeType.prototype.onNodeCreated;
-        nodeType.prototype.onNodeCreated = function () {
-            origOnCreated?.apply(this, arguments);
-            requestAnimationFrame(() => {
-                updateCustomSizeWidgets(this);
-                updateRefDependentWidgets(this);
-                updateMaskWidgets(this);
-            });
-        };
+            const origOnConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (info) {
+                origOnConfigure?.apply(this, arguments);
+                // Run after the widget values have been restored from the workflow.
+                requestAnimationFrame(() => {
+                    migrateLegacyMegapixels(this);
+                    updateRefDependentWidgets(this);
+                });
+            };
 
-        const origOnConfigure = nodeType.prototype.onConfigure;
-        nodeType.prototype.onConfigure = function (info) {
-            origOnConfigure?.apply(this, arguments);
-            // Run after the widget values have been restored from the workflow.
-            requestAnimationFrame(() => {
-                migrateLegacyMegapixels(this);
-                updateRefDependentWidgets(this);
-            });
-        };
+            const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
+            nodeType.prototype.onWidgetChanged = function (name, value) {
+                origOnWidgetChanged?.apply(this, arguments);
+                if (name === "aspect_ratio")  updateCustomSizeWidgets(this);
+                if (name === "use_detailing") updateDetailingWidgets(this);
+                if (name === "image_fit")     updateOutpaintFillWidget(this);
+            };
 
-        const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
-        nodeType.prototype.onWidgetChanged = function (name, value) {
-            origOnWidgetChanged?.apply(this, arguments);
-            if (name === "aspect_ratio")  updateCustomSizeWidgets(this);
-            if (name === "use_detailing") updateDetailingWidgets(this);
-            if (name === "image_fit")     updateOutpaintFillWidget(this);
-        };
+            const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+            nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
+                origOnConnectionsChange?.apply(this, arguments);
+                // type 1 = input connection change. Refresh both the mask-driven
+                // widgets and the ref-driven ones (ref_* slots are Autogrow inputs).
+                if (type === 1) {
+                    updateMaskWidgets(this);
+                    updateRefDependentWidgets(this);
+                }
+            };
+            return;
+        }
 
-        const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
-        nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
-            origOnConnectionsChange?.apply(this, arguments);
-            // type 1 = input connection change. Refresh both the mask-driven
-            // widgets and the ref-driven ones (ref_* slots are Autogrow inputs).
-            if (type === 1) {
-                updateMaskWidgets(this);
-                updateRefDependentWidgets(this);
-            }
-        };
+        if (nodeData.name === "NKDKleinPostsampling") {
+            const origOnCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                origOnCreated?.apply(this, arguments);
+                requestAnimationFrame(() => updateAutoDetectWidgets(this));
+            };
+
+            const origOnConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (info) {
+                origOnConfigure?.apply(this, arguments);
+                requestAnimationFrame(() => updateAutoDetectWidgets(this));
+            };
+
+            const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
+            nodeType.prototype.onWidgetChanged = function (name, value) {
+                origOnWidgetChanged?.apply(this, arguments);
+                if (name === "auto_detect_edit_region") updateAutoDetectWidgets(this);
+            };
+            return;
+        }
     },
 });

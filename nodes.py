@@ -15,6 +15,10 @@ from .helpers import (
     _megapixels_to_pixels,
     _fit_image_to_canvas,
     _ASPECT_RATIO_OPTIONS,
+    _tensor_to_np,
+    _np_to_tensor,
+    _composite_with_options,
+    _auto_detect_composite,
 )
 
 _ASPECT_RATIO_KEYS = list(_ASPECT_RATIO_OPTIONS.keys())
@@ -548,6 +552,88 @@ class NKDKleinPostsampling(io.ComfyNode):
                         "transition; lower values keep the edge crisp."
                     ),
                     display_name="Uncrop Feather"),
+
+                io.Float.Input("match_original_colors", default=0.0, min=0.0, max=1.0, step=0.05,
+                    tooltip=(
+                        "Pulls the regenerated area's colors and lighting back toward "
+                        "the original image. The model often shifts the overall "
+                        "white balance or saturation slightly — this corrects that "
+                        "drift so the composite looks like it belongs to the same "
+                        "scene. 0 leaves the colors as the model produced them; "
+                        "1 fully matches them to the original. Statistics are read "
+                        "only from the unchanged background, so the edit itself "
+                        "keeps the colors it was supposed to have."
+                    ),
+                    display_name="Match Original Colors"),
+
+                io.Boolean.Input("seamless_edges", default=False,
+                    tooltip=(
+                        "Uses Poisson blending to mathematically erase any remaining "
+                        "color or lighting seam at the edge of the regenerated zone. "
+                        "Turn this on when the boundary is still visible after color "
+                        "matching — usually on dramatic relighting or strong style "
+                        "changes. Heavier than a normal blend and can introduce "
+                        "smearing on textured edges, so leave it off by default."
+                    ),
+                    display_name="Seamless Edges"),
+
+                io.Boolean.Input("auto_detect_edit_region", default=False,
+                    tooltip=(
+                        "When you run an edit without giving a mask, this turns on "
+                        "automatic detection of what actually changed between your "
+                        "input and the generated image, and composites only that "
+                        "region back. Keeps the unchanged parts of the original "
+                        "pixel-perfect across multiple iterative edits, instead of "
+                        "letting the model rewrite the whole canvas every time. "
+                        "Only used when there is an input image but no mask — "
+                        "ignored otherwise."
+                    ),
+                    display_name="Auto-Detect Edit Region"),
+
+                io.Float.Input("edge_softness", default=2.0, min=0.0, max=10.0, step=0.25,
+                    tooltip=(
+                        "How softly the auto-detected region fades into the original. "
+                        "Expressed as a percentage of the image diagonal, so the same "
+                        "value looks the same at any resolution. Higher values give a "
+                        "wider, gentler transition (good for skin, fabric, hair); "
+                        "lower values keep the edge tight (good for geometric edits). "
+                        "Only used when Auto-Detect Edit Region is on."
+                    ),
+                    display_name="Edge Softness"),
+
+                io.Float.Input("region_padding", default=0.0, min=-3.0, max=3.0, step=0.1,
+                    tooltip=(
+                        "Grows or shrinks the auto-detected region before blending. "
+                        "Positive values expand outward — handy when the detection "
+                        "falls just short of the true edges. Negative values pull "
+                        "the region inward — handy when it bleeds into background "
+                        "that should stay untouched. Expressed as a percentage of "
+                        "the image diagonal. Only used when Auto-Detect Edit Region "
+                        "is on."
+                    ),
+                    display_name="Region Padding"),
+
+                io.Boolean.Input("fill_inner_gaps", default=False,
+                    tooltip=(
+                        "Fills small holes inside the auto-detected region. When the "
+                        "edit changed an object's color or texture but not its "
+                        "interior contrast, detection can leave little voids in the "
+                        "middle. Turn this on to seal them so the whole object gets "
+                        "composited cleanly. Only used when Auto-Detect Edit Region "
+                        "is on."
+                    ),
+                    display_name="Fill Inner Gaps"),
+
+                io.Boolean.Input("extend_to_borders", default=True,
+                    tooltip=(
+                        "Extrapolates the auto-detected region into any border void "
+                        "the alignment step leaves behind. Without this, a thin "
+                        "frame of the original can peek through around the edge of "
+                        "the regenerated zone. Leave on unless you see mirrored "
+                        "artifacts at the image border. Only used when Auto-Detect "
+                        "Edit Region is on."
+                    ),
+                    display_name="Extend To Borders"),
             ],
             outputs=[
                 io.Image.Output("image"),
@@ -567,7 +653,16 @@ class NKDKleinPostsampling(io.ComfyNode):
         image: torch.Tensor,
         bundle: KleinBundle,
         uncrop_feather: int = 10,
+        match_original_colors: float = 0.0,
+        seamless_edges: bool = False,
+        auto_detect_edit_region: bool = False,
+        edge_softness: float = 2.0,
+        region_padding: float = 0.0,
+        fill_inner_gaps: bool = False,
+        extend_to_borders: bool = True,
     ) -> io.NodeOutput:
+
+        post_blend_needed = match_original_colors > 0.0 or seamless_edges
 
         # Case 1: detailing crop → recompose onto ref_0 at native full resolution.
         # crop_box and crop_background are already in native coords (set by Presampling).
@@ -581,6 +676,10 @@ class NKDKleinPostsampling(io.ComfyNode):
                      else bundle.processed_mask,
                 feather=uncrop_feather,
             )
+            if post_blend_needed:
+                composite = _apply_post_blend(
+                    bundle.crop_background, composite, match_original_colors, seamless_edges,
+                )
             debug = _difference_debug(composite, bundle.crop_background)
             return io.NodeOutput(composite, debug)
 
@@ -589,17 +688,40 @@ class NKDKleinPostsampling(io.ComfyNode):
             orig    = _resize(bundle.original_image, bundle.target_width, bundle.target_height)
             sampled = _resize(image, bundle.target_width, bundle.target_height)
             if bundle.processed_mask is not None:
-                alpha = bundle.processed_mask.unsqueeze(-1)
+                mask_2d = bundle.processed_mask
+                alpha = mask_2d.unsqueeze(-1)
             else:
-                alpha = torch.ones(
-                    sampled.shape[0], bundle.target_height, bundle.target_width, 1,
+                mask_2d = torch.ones(
+                    sampled.shape[0], bundle.target_height, bundle.target_width,
                     device=sampled.device,
                 )
+                alpha = mask_2d.unsqueeze(-1)
             composite = sampled * alpha + orig * (1.0 - alpha)
+            if post_blend_needed:
+                composite = _apply_post_blend_masked(
+                    orig, composite, mask_2d, match_original_colors, seamless_edges,
+                )
             debug = _difference_debug(composite, orig)
             return io.NodeOutput(composite, debug)
 
-        # Case 3: t2i / img2img → pass through (no original to diff against)
+        # Case 4: img2img with auto-detect → find changed region, blend gen back over original.
+        # Triggered explicitly by the user toggle. Skipped for t2i (no original) and when
+        # the toggle is off, falling through to passthrough.
+        if (auto_detect_edit_region
+            and bundle.mode == "img2img"
+            and bundle.original_image is not None):
+            orig    = _resize(bundle.original_image, bundle.target_width, bundle.target_height)
+            sampled = _resize(image,                 bundle.target_width, bundle.target_height)
+            composite, sharp_mask = _run_auto_detect(
+                orig, sampled,
+                region_padding, edge_softness,
+                fill_inner_gaps, extend_to_borders,
+                match_original_colors, seamless_edges,
+            )
+            debug = _mask_overlay_debug(orig, sharp_mask)
+            return io.NodeOutput(composite, debug)
+
+        # Case 3: t2i / img2img passthrough (no original to diff against, or auto-detect off)
         debug = torch.zeros_like(image)
         return io.NodeOutput(image, debug)
 
@@ -610,3 +732,75 @@ def _difference_debug(composite: torch.Tensor, original: torch.Tensor, gain: flo
     if original.shape != composite.shape:
         original = _resize(original, composite.shape[2], composite.shape[1])
     return (composite - original).abs().mul(gain).clamp(0.0, 1.0)
+
+
+def _apply_post_blend(orig: torch.Tensor, composite: torch.Tensor,
+                      match_strength: float, seamless: bool) -> torch.Tensor:
+    """Re-blend the entire composite with color match + optional Poisson, using the
+    auto-detected difference between orig and composite as the alpha. Used by the
+    detail-crop path where the binary uncrop mask is already burnt in but the seam
+    can still show through as a color shift."""
+    import numpy as np
+    if orig.shape != composite.shape:
+        orig = _resize(orig, composite.shape[2], composite.shape[1])
+    orig_np = _tensor_to_np(orig)
+    comp_np = _tensor_to_np(composite)
+    diff = np.abs(orig_np - comp_np).max(axis=-1)
+    mask = (diff > 0.01).astype(np.float32)
+    if mask.sum() < 1:
+        return composite
+    valid = np.ones_like(mask, dtype=np.float32)
+    out = _composite_with_options(orig_np, comp_np, mask, valid, match_strength, seamless)
+    return _np_to_tensor(out, composite.device, composite.dtype)
+
+
+def _apply_post_blend_masked(orig: torch.Tensor, composite: torch.Tensor,
+                             mask: torch.Tensor,
+                             match_strength: float, seamless: bool) -> torch.Tensor:
+    """Same as _apply_post_blend but uses the supplied mask (inpaint path) instead of
+    auto-deriving one. Skips the seamless clone if the mask is empty so we don't crash
+    seamlessClone on a zero bounding rect."""
+    import numpy as np
+    orig_np = _tensor_to_np(orig)
+    comp_np = _tensor_to_np(composite)
+    m = mask[0] if mask.dim() == 3 else mask
+    mask_np = m.detach().clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
+    if mask_np.sum() < 1:
+        return composite
+    valid = np.ones_like(mask_np, dtype=np.float32)
+    out = _composite_with_options(orig_np, comp_np, mask_np, valid, match_strength, seamless)
+    return _np_to_tensor(out, composite.device, composite.dtype)
+
+
+def _run_auto_detect(orig: torch.Tensor, sampled: torch.Tensor,
+                     region_padding: float, edge_softness: float,
+                     fill_inner_gaps: bool, extend_to_borders: bool,
+                     match_strength: float, seamless: bool):
+    """Bridge tensor↔numpy for the auto-detect composite. Returns (composite_tensor,
+    sharp_mask_np) — the sharp mask is forwarded to the debug overlay so the user
+    can see what was detected."""
+    orig_np = _tensor_to_np(orig)
+    gen_np  = _tensor_to_np(sampled)
+    result_np, _, sharp_np = _auto_detect_composite(
+        orig_np, gen_np,
+        grow_pct=region_padding,
+        feather_pct=edge_softness,
+        fill_holes=fill_inner_gaps,
+        extend_to_borders=extend_to_borders,
+        color_match_strength=match_strength,
+        seamless=seamless,
+    )
+    return _np_to_tensor(result_np, sampled.device, sampled.dtype), sharp_np
+
+
+def _mask_overlay_debug(orig: torch.Tensor, sharp_mask_np) -> torch.Tensor:
+    """Tint the detected change region green over the original. Replaces the
+    amplified-diff debug in Case 4 because the diff is intentionally large there
+    (the model rewrote a whole region) — what the user actually wants to see is
+    'where did the pipeline decide to composite'."""
+    import numpy as np
+    base = _tensor_to_np(orig)
+    overlay = base.copy()
+    m = sharp_mask_np > 0.5
+    overlay[m] = overlay[m] * 0.5 + np.array([0.0, 0.5, 0.0], dtype=np.float32)
+    return _np_to_tensor(np.clip(overlay, 0.0, 1.0), orig.device, orig.dtype)

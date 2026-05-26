@@ -664,3 +664,439 @@ def _apply_reference_latent(conditioning: list, ref_latent: torch.Tensor) -> lis
         {"reference_latents": [ref_latent]},
         append=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Edit-composite helpers (Klein-edit auto-detect pipeline)
+#
+# The pipeline below detects where a Klein-edited image differs from its
+# source and blends only that region back. All percentage parameters are
+# expressed as % of the image diagonal so the same value yields equivalent
+# results at any resolution.
+# ---------------------------------------------------------------------------
+
+def _diag_px(h: int, w: int) -> float:
+    return math.sqrt(h * h + w * w)
+
+
+def _pct_px(pct: float, diag: float) -> int:
+    return max(0, round(abs(pct) * diag / 100.0))
+
+
+def _tensor_to_np(image: torch.Tensor):
+    import numpy as np
+    return image[0, :, :, :3].detach().clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
+
+
+def _np_to_tensor(arr, device, dtype) -> torch.Tensor:
+    import numpy as np
+    t = torch.from_numpy(np.ascontiguousarray(arr)).to(device=device, dtype=dtype)
+    return t.unsqueeze(0)
+
+
+# ---- LAB conversion (D65, sRGB) ---------------------------------------------
+# OpenCV's cv2.cvtColor with COLOR_RGB2LAB rounds through uint8 and loses the
+# precision we need for Reinhard transfer + Delta-E thresholding on subtle
+# Klein shifts. The float versions below stay in float32 throughout.
+
+def _rgb_to_lab(rgb):
+    import numpy as np
+    lin = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
+    M = np.array([
+        [0.4124564, 0.3575761, 0.1804375],
+        [0.2126729, 0.7151522, 0.0721750],
+        [0.0193339, 0.1191920, 0.9503041],
+    ], dtype=np.float32)
+    xyz = lin @ M.T / np.array([0.95047, 1.0, 1.08883], dtype=np.float32)
+    delta = (6.0 / 29.0)
+    delta3 = delta ** 3
+
+    def f(t):
+        return np.where(t > delta3, np.cbrt(t), t / (3.0 * delta * delta) + 4.0 / 29.0)
+
+    fx, fy, fz = f(xyz[..., 0]), f(xyz[..., 1]), f(xyz[..., 2])
+    L = 116.0 * fy - 16.0
+    a = 500.0 * (fx - fy)
+    b = 200.0 * (fy - fz)
+    return np.stack([L, a, b], axis=-1).astype(np.float32)
+
+
+def _lab_to_rgb(lab):
+    import numpy as np
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+    fy = (L + 16.0) / 116.0
+    fx = a / 500.0 + fy
+    fz = fy - b / 200.0
+    delta = 6.0 / 29.0
+
+    def f_inv(t):
+        return np.where(t > delta, t ** 3, 3.0 * delta * delta * (t - 4.0 / 29.0))
+
+    xyz = np.stack([
+        f_inv(fx) * 0.95047,
+        f_inv(fy) * 1.0,
+        f_inv(fz) * 1.08883,
+    ], axis=-1)
+    M_inv = np.array([
+        [3.2404542, -1.5371385, -0.4985314],
+        [-0.9692660, 1.8760108, 0.0415560],
+        [0.0556434, -0.2040259, 1.0572252],
+    ], dtype=np.float32)
+    lin = np.clip(xyz @ M_inv.T, 0.0, None)
+    rgb = np.where(lin <= 0.0031308, lin * 12.92, 1.055 * (lin ** (1.0 / 2.4)) - 0.055)
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
+# ---- Reinhard color match (background-only statistics) -----------------------
+
+def _reinhard_match(orig_rgb, gen_rgb, composite_mask, valid_mask, strength):
+    """Match gen's color statistics to orig using only background pixels.
+    Returns gen unchanged when the background is too small to be reliable —
+    matching on the edit region itself would just propagate the shift."""
+    import numpy as np
+    if strength <= 0.0:
+        return gen_rgb
+    bg = (composite_mask < 0.05) & (valid_mask > 0.5)
+    if bg.sum() < 100:
+        return gen_rgb
+    orig_lab = _rgb_to_lab(orig_rgb)
+    gen_lab = _rgb_to_lab(gen_rgb)
+    o_mean = orig_lab[bg].mean(axis=0)
+    o_std = orig_lab[bg].std(axis=0) + 1e-5
+    g_mean = gen_lab[bg].mean(axis=0)
+    g_std = gen_lab[bg].std(axis=0) + 1e-5
+    matched = (gen_lab - g_mean) / g_std * o_std + o_mean
+    matched_rgb = _lab_to_rgb(matched)
+    blended = matched_rgb * strength + gen_rgb * (1.0 - strength)
+    return np.clip(blended, 0.0, 1.0)
+
+
+# ---- Hybrid diff (LAB + Sobel) ----------------------------------------------
+
+def _hybrid_diff(orig_rgb, gen_rgb, blur_k):
+    import cv2
+    import numpy as np
+    o_blur = cv2.GaussianBlur(orig_rgb, blur_k, 0)
+    g_blur = cv2.GaussianBlur(gen_rgb, blur_k, 0)
+    o_lab = _rgb_to_lab(o_blur)
+    g_lab = _rgb_to_lab(g_blur)
+    d = o_lab - g_lab
+    # Damp global luminance shifts (typical Klein side-effect) but boost a/b
+    # so hue/chroma edits still register.
+    d[..., 0] *= 0.5
+    d[..., 1] *= 1.2
+    d[..., 2] *= 1.2
+    color = np.sqrt((d * d).sum(axis=-1))
+    o_gray = cv2.cvtColor((o_blur * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    g_gray = cv2.cvtColor((g_blur * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    o_mag = np.hypot(cv2.Sobel(o_gray, cv2.CV_32F, 1, 0, ksize=3),
+                     cv2.Sobel(o_gray, cv2.CV_32F, 0, 1, ksize=3))
+    g_mag = np.hypot(cv2.Sobel(g_gray, cv2.CV_32F, 1, 0, ksize=3),
+                     cv2.Sobel(g_gray, cv2.CV_32F, 0, 1, ksize=3))
+    # Scale gradient diff into the Delta-E numeric range so a single threshold
+    # handles both signals.
+    struct = np.abs(o_mag - g_mag) * 40.0
+    return color + struct
+
+
+# ---- MAD auto-threshold (global + local) ------------------------------------
+
+def _mad_threshold(diff, valid, k=6.0, lo=3.0, hi=60.0):
+    import numpy as np
+    sample = diff[valid > 0.5] if (valid is not None and valid.sum() > 100) else diff.ravel()
+    if sample.size > 50000:
+        sample = np.random.choice(sample, 50000, replace=False)
+    med = float(np.median(sample))
+    mad = max(float(np.median(np.abs(sample - med))), 0.5)
+    return float(np.clip(med + k * mad, lo, hi))
+
+
+def _local_threshold(diff, valid, diag, k=6.0, lo=3.0, hi=60.0):
+    import cv2
+    import numpy as np
+    r = max(15, int(round(diag * 0.06)))
+    if r % 2 == 0:
+        r += 1
+    ksize = (r, r)
+    d = diff.astype(np.float32)
+    local_mean = cv2.blur(d, ksize)
+    local_mad = np.maximum(cv2.blur(np.abs(d - local_mean), ksize), 0.5)
+    thresh = np.clip(local_mean + k * local_mad, lo, hi).astype(np.float32)
+    if valid is not None:
+        thresh = np.where(valid > 0.5, thresh, hi)
+    return thresh
+
+
+# ---- SIFT homography alignment ----------------------------------------------
+
+def _sift_align(gray_orig, gray_gen, gen_rgb, restrict_mask=None):
+    """Align gen onto orig via SIFT + MAGSAC homography.
+    `restrict_mask` (uint8 255 where to look for features) lets a second pass
+    re-align using only known-background pixels — useful when a big edit
+    contaminated the first pass.
+    Returns (aligned_rgb, valid_mask, n_inliers). Falls back to identity when
+    matching fails so the pipeline can still proceed."""
+    import cv2
+    import numpy as np
+    H, W = gray_orig.shape[:2]
+    valid_fallback = np.ones((H, W), dtype=np.float32)
+
+    # CLAHE boosts feature matching under heavy color/lighting shifts.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    eq_orig = clahe.apply(gray_orig)
+    eq_gen = clahe.apply(gray_gen)
+
+    sift = cv2.SIFT_create(nfeatures=10000, contrastThreshold=0.03)
+    kp1, des1 = sift.detectAndCompute(eq_orig, mask=restrict_mask)
+    kp2, des2 = sift.detectAndCompute(eq_gen, mask=None)
+    if des1 is None or des2 is None or len(kp1) < 10 or len(kp2) < 10:
+        return gen_rgb, valid_fallback, 0
+
+    flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=80))
+    raw = flann.knnMatch(des1, des2, k=2)
+    good = [m for pair in raw if len(pair) == 2 for m, n in [pair] if m.distance < 0.75 * n.distance]
+    if len(good) < 10:
+        return gen_rgb, valid_fallback, 0
+
+    pts_o = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    pts_g = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    method = getattr(cv2, "USAC_MAGSAC", cv2.RANSAC)
+    H_mat, inliers = cv2.findHomography(pts_g, pts_o, method, 4.0)
+    if H_mat is None:
+        return gen_rgb, valid_fallback, 0
+    # Reject degenerate transforms (extreme scale/shear) that would warp the
+    # image into garbage even with many inliers.
+    det = H_mat[0, 0] * H_mat[1, 1] - H_mat[0, 1] * H_mat[1, 0]
+    if not (0.2 < det < 5.0):
+        return gen_rgb, valid_fallback, 0
+
+    aligned = cv2.warpPerspective(gen_rgb, H_mat, (W, H),
+                                  flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    valid = cv2.warpPerspective(np.ones((H, W), dtype=np.float32), H_mat, (W, H),
+                                flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0)
+    return aligned, valid, int(inliers.sum()) if inliers is not None else 0
+
+
+# ---- DIS optical flow + warp ------------------------------------------------
+
+def _dis_flow(gray_a, gray_b):
+    import cv2
+    flow = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM).calc(gray_a, gray_b, None)
+    # Median-blur the vector field to suppress isolated tearing spikes.
+    flow[..., 0] = cv2.medianBlur(flow[..., 0], 5)
+    flow[..., 1] = cv2.medianBlur(flow[..., 1], 5)
+    return flow
+
+
+def _flow_warp(image, flow):
+    import cv2
+    import numpy as np
+    h, w = flow.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    return cv2.remap(image, (xx + flow[..., 0]).astype(np.float32),
+                     (yy + flow[..., 1]).astype(np.float32),
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+
+# ---- Mask cleanup -----------------------------------------------------------
+
+def _mask_grow_px(mask, grow_px):
+    import cv2
+    import numpy as np
+    if grow_px == 0:
+        return mask
+    r = abs(grow_px)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r * 2 + 1, r * 2 + 1))
+    op = cv2.MORPH_DILATE if grow_px > 0 else cv2.MORPH_ERODE
+    return cv2.morphologyEx(mask.astype(np.uint8), op, k).astype(np.float32)
+
+
+def _mask_fill_holes(mask):
+    import cv2
+    import numpy as np
+    binary = (mask > 0.5).astype(np.uint8)
+    h, w = binary.shape
+    n, labeled = cv2.connectedComponents(binary, connectivity=8)
+    out = binary.copy()
+    for idx in range(1, n):
+        island = (labeled == idx).astype(np.uint8)
+        padded = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        padded[1:h + 1, 1:w + 1] = island
+        inv = 1 - padded
+        cv2.floodFill(inv, None, (0, 0), 0)
+        out = np.clip(out + inv[1:h + 1, 1:w + 1], 0, 1).astype(np.uint8)
+    return out.astype(np.float32)
+
+
+def _mask_bleed_to_invalid(mask, valid):
+    """Extend the mask into the SIFT void border (pixels with no source data)
+    so the original doesn't peek through as a thin frame."""
+    import cv2
+    import numpy as np
+    invalid = (valid < 0.5).astype(np.uint8)
+    if invalid.max() == 0:
+        return mask
+    dist = cv2.distanceTransform(invalid, cv2.DIST_L2, 3)
+    depth = int(np.ceil(dist.max()))
+    if depth == 0:
+        return mask
+    bled = mask.copy()
+    remaining = depth
+    while remaining > 0:
+        step = min(remaining, 60)
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (step * 2 + 1, step * 2 + 1))
+        bled = cv2.dilate(bled, k)
+        remaining -= step
+    return np.where(valid > 0.5, mask, bled).astype(np.float32)
+
+
+def _mask_feather(mask, feather_px):
+    """Distance-transform based feather with smoothstep falloff — softer and
+    more uniform than a gaussian blur on a binary mask."""
+    import cv2
+    import numpy as np
+    if feather_px <= 0:
+        return mask.astype(np.float32)
+    inv = (mask < 0.5).astype(np.uint8)
+    if inv.min() != 0:
+        return mask.astype(np.float32)
+    dist = cv2.distanceTransform(inv, cv2.DIST_L2, 5)
+    fade = feather_px * 2.5
+    t = np.clip(1.0 - dist / fade, 0.0, 1.0)
+    return (t * t * (3.0 - 2.0 * t)).astype(np.float32)
+
+
+# ---- Poisson seamless clone -------------------------------------------------
+
+def _seamless_clone(orig_rgb, gen_rgb, mask):
+    """Poisson blend gen onto orig inside `mask`. The clamped-edge guard on the
+    binary mask prevents the OpenCV crash you get when the mask touches the
+    image boundary, and the bounding-rect centre matches what seamlessClone
+    computes internally — using numpy min/max instead shifts the result by 1px."""
+    import cv2
+    import numpy as np
+    o_u8 = (np.clip(orig_rgb, 0, 1) * 255).astype(np.uint8)
+    g_u8 = (np.clip(gen_rgb, 0, 1) * 255).astype(np.uint8)
+    binary = (mask > 0.1).astype(np.uint8) * 255
+    binary[0, :] = 0; binary[-1, :] = 0
+    binary[:, 0] = 0; binary[:, -1] = 0
+    m3 = mask[..., np.newaxis]
+    x, y, w, h = cv2.boundingRect(binary)
+    if w == 0 or h == 0:
+        return np.clip(orig_rgb * (1.0 - m3) + gen_rgb * m3, 0, 1)
+    center = (x + w // 2, y + h // 2)
+    try:
+        cloned = cv2.seamlessClone(g_u8, o_u8, binary, center, cv2.NORMAL_CLONE)
+        cloned = cloned.astype(np.float32) / 255.0
+        return np.clip(orig_rgb * (1.0 - m3) + cloned * m3, 0, 1)
+    except Exception:
+        return np.clip(orig_rgb * (1.0 - m3) + gen_rgb * m3, 0, 1)
+
+
+# ---- Top-level: alpha + color + seamless composite --------------------------
+
+def _composite_with_options(orig_rgb, gen_rgb, mask_float, valid_mask,
+                            color_match_strength: float, seamless: bool):
+    """Apply Reinhard match (if enabled) then either alpha or Poisson blend.
+    Centralises the final blend stage so Cases 1/2/4 in Postsampling all go
+    through the same code path."""
+    import numpy as np
+    if valid_mask is None:
+        import numpy as np
+        valid_mask = np.ones_like(mask_float, dtype=np.float32)
+    gen_matched = _reinhard_match(orig_rgb, gen_rgb, mask_float, valid_mask, color_match_strength)
+    if seamless:
+        return _seamless_clone(orig_rgb, gen_matched, mask_float)
+    m3 = mask_float[..., np.newaxis]
+    return np.clip(orig_rgb * (1.0 - m3) + gen_matched * m3, 0, 1)
+
+
+# ---- Top-level: auto-detect edit pipeline (Case 4) --------------------------
+
+def _auto_detect_composite(orig_rgb, gen_rgb,
+                           grow_pct: float, feather_pct: float,
+                           fill_holes: bool, extend_to_borders: bool,
+                           color_match_strength: float, seamless: bool):
+    """Detect the edited region between orig and gen, then composite gen back
+    onto orig only there. Returns (result_rgb, composite_mask, sharp_mask).
+    The sharp mask is the pre-feather binary detection — useful for the debug
+    output. The composite mask is the feathered alpha actually used to blend."""
+    import cv2
+    import numpy as np
+
+    h, w = orig_rgb.shape[:2]
+    diag = _diag_px(h, w)
+
+    # Blur kernel scales with resolution so diff smoothing has the same
+    # perceptual width at 1MP and 4MP.
+    bk = max(3, int(round(diag / 724.0 * 3)))
+    if bk % 2 == 0:
+        bk += 1
+    blur_k = (bk, bk)
+    smooth_k = max(bk, 5) | 1
+
+    grow_px = _pct_px(grow_pct, diag)
+    if grow_pct < 0:
+        grow_px = -grow_px
+    feather_px = _pct_px(feather_pct, diag)
+
+    orig_u8 = (np.clip(orig_rgb, 0, 1) * 255).astype(np.uint8)
+    gen_u8 = (np.clip(gen_rgb, 0, 1) * 255).astype(np.uint8)
+    gray_o = cv2.cvtColor(orig_u8, cv2.COLOR_RGB2GRAY)
+    gray_g = cv2.cvtColor(gen_u8, cv2.COLOR_RGB2GRAY)
+
+    # Pass 1: blind SIFT alignment → coarse change mask.
+    aligned_1, valid_1, _ = _sift_align(gray_o, gray_g, gen_rgb, restrict_mask=None)
+    gray_a1 = cv2.cvtColor((np.clip(aligned_1, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    flow_1 = _dis_flow(gray_o, gray_a1)
+    warped_1 = _flow_warp(aligned_1, flow_1)
+
+    diff_direct_1 = _hybrid_diff(orig_rgb, aligned_1, blur_k)
+    diff_warped_1 = _hybrid_diff(orig_rgb, warped_1, blur_k)
+    de_thresh = _mad_threshold(diff_direct_1, valid_1)
+    # Blend direct + flow-warped diffs: direct is sensitive inside the edit,
+    # warped is cleaner across the background where motion explains the diff.
+    bw_1 = np.clip(diff_direct_1 / (de_thresh + 1e-6), 0.0, 1.0)
+    diff_1 = cv2.GaussianBlur(bw_1 * diff_direct_1 + (1.0 - bw_1) * diff_warped_1, (smooth_k, smooth_k), 0)
+    local_1 = _local_threshold(diff_1, valid_1, diag)
+    coarse = (diff_1 > np.minimum(de_thresh, local_1)).astype(np.float32) * valid_1
+
+    # Pass 2: re-align using ONLY background pixels (eroded so we never grab
+    # features straddling the edit).
+    bg_seed = (coarse < 0.1).astype(np.uint8) * 255
+    bg_seed = cv2.erode(bg_seed, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)))
+    if (bg_seed > 0).sum() > h * w * 0.05:
+        aligned_2, valid_2, _ = _sift_align(gray_o, gray_g, gen_rgb, restrict_mask=bg_seed)
+        # If pass 2 failed (no homography), keep pass 1's alignment.
+        if valid_2.sum() < valid_1.sum() * 0.5:
+            aligned_2, valid_2 = aligned_1, valid_1
+    else:
+        aligned_2, valid_2 = aligned_1, valid_1
+
+    # Pass 3: precision mask on the refined alignment.
+    gray_a2 = cv2.cvtColor((np.clip(aligned_2, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+    flow_2 = _dis_flow(gray_o, gray_a2)
+    warped_2 = _flow_warp(aligned_2, flow_2)
+    diff_direct_2 = _hybrid_diff(orig_rgb, aligned_2, blur_k)
+    diff_warped_2 = _hybrid_diff(orig_rgb, warped_2, blur_k)
+    bw_2 = np.clip(diff_direct_2 / (de_thresh + 1e-6), 0.0, 1.0)
+    diff_2 = cv2.GaussianBlur(bw_2 * diff_direct_2 + (1.0 - bw_2) * diff_warped_2, (smooth_k, smooth_k), 0)
+    local_2 = _local_threshold(diff_2, valid_2, diag)
+    sharp = (diff_2 > np.minimum(de_thresh, local_2)).astype(np.float32) * valid_2
+
+    # Cleanup (order matters: dilate/erode → fill holes → close → bleed → feather).
+    if grow_px != 0:
+        sharp = _mask_grow_px(sharp, grow_px) * valid_2
+    if fill_holes:
+        sharp = _mask_fill_holes(sharp) * valid_2
+    if extend_to_borders:
+        sharp = _mask_bleed_to_invalid(sharp, valid_2)
+
+    composite_mask = _mask_feather(sharp, feather_px) if feather_px > 0 else sharp.astype(np.float32)
+    if not extend_to_borders:
+        composite_mask = composite_mask * valid_2
+
+    result = _composite_with_options(orig_rgb, aligned_2, composite_mask, valid_2,
+                                     color_match_strength, seamless)
+    return result, composite_mask, sharp
