@@ -6,6 +6,17 @@ A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. P
 
 ---
 
+## What's new in 1.8.x
+
+- **New *Match Original Colors*** *(Postsampling)* — pulls the regenerated area's colors and lighting back toward the original image. The model often shifts the overall white balance or saturation slightly; this dial corrects that drift so the edit blends into the same scene. `0` leaves things as the model produced them; `1` matches them fully to the original.
+- **New *Seamless Edges*** *(Postsampling)* — erases any remaining color or lighting seam at the boundary of the regenerated zone. Best for dramatic relighting or strong style changes where the edge is still visible after color matching. Off by default — it's heavier and can smear textured edges.
+- **New *Auto-Detect Edit Region*** *(Postsampling)* — when you run an img2img edit **without a mask**, the node figures out which pixels actually changed and composites only those back. Keeps the rest of the image pixel-perfect across iterative edits instead of letting the model rewrite the whole canvas every time. Comes with its own fine-tuning controls:
+  - **Edge Softness** — how gently the detected region fades into the original.
+  - **Region Padding** — grow or shrink the detected region before blending.
+  - **Fill Inner Gaps** — seal small holes inside the detected region.
+  - **Extend To Borders** — extrapolate to the image edge so no frame of the original peeks through.
+- **Example workflow included** — a ready-to-use workflow lives in `example_workflows/` (with a preview image). Drag it into ComfyUI to get a working setup immediately.
+
 ## What's new in 1.7.x
 
 - **Megapixels is now a slider** with decimal precision (0.1 – 4.0) instead of a dropdown with fixed steps. You can pick any size that suits your needs.
@@ -90,11 +101,23 @@ This is the dial that controls how much creative freedom the model has versus ho
 
 If you're getting unwanted drift between the original and the result (faces shifting, edges not quite aligning), bumping this up usually fixes it. If your generations feel too restrained or "stuck" close to the input, try negative values for more creative leeway.
 
+### Postsampling clean-up
+
+These live on the Postsampling node and fine-tune how the regenerated area is composited back over the original.
+
+- **Uncrop Feather** — softens the edge where a detailed zoom blends back into the rest of the image.
+- **Match Original Colors** — pulls the new area's colors and lighting back toward the original to undo any white-balance or saturation drift from the model. `0` = no correction, `1` = full match. The reference is read only from the unchanged background, so the edit itself keeps its intended colors.
+- **Seamless Edges** — turns on Poisson blending to erase any remaining color/lighting seam at the edge of the regenerated zone. Turn on for dramatic relighting or strong style changes; leave off by default (it's heavier and can smear textured edges).
+- **Auto-Detect Edit Region** *(img2img without a mask)* — detects what actually changed between the input and the generated image and composites only that region back. Keeps the unchanged parts of the original pixel-perfect across iterative edits. Ignored when there's no input image, or when a mask is connected.
+- **Edge Softness** — how softly the auto-detected region fades into the original (% of image diagonal, so it looks the same at any resolution). Higher = wider, gentler transition; lower = tight, geometric edits.
+- **Region Padding** — grow (positive) or shrink (negative) the auto-detected region before blending. Useful when detection falls just short of the true edges, or bleeds into background that should stay untouched.
+- **Fill Inner Gaps** — seals small holes inside the auto-detected region, for when the edit changed an object's color but not its interior contrast.
+- **Extend To Borders** — extrapolates the detected region into any thin border void left by alignment, so no frame of the original peeks through. Leave on.
+
 ### Other
 
 - **Pin Model** — keeps the model loaded in your graphics card so it doesn't reload between runs. Faster, but only turn it on if you have plenty of VRAM.
 - **Bypass Reference** — turns off the model's ability to look at your reference image, so it behaves like a traditional image-to-image model instead. Leave it off in most cases.
-- **Uncrop Feather** *(Postsampling)* — softens the edge where a detailed zoom blends back into the rest of the image.
 
 ---
 
@@ -139,28 +162,47 @@ If you're getting unwanted drift between the original and the result (faces shif
 2. As you connect, more slots will appear — add up to 8 reference images.
 3. Write a prompt and run.
 
+**Iteratively edit an image without a mask (keep the rest pixel-perfect)**
+1. Drop your image into `ref_0`.
+2. Write a prompt describing the change ("make the sky stormy", "swap the shirt for a denim jacket", …).
+3. On the Postsampling node, turn on **Auto-Detect Edit Region**.
+4. Run. Only the changed region is composited back; the rest of the image stays identical, so you can chain several edits without drift.
+
+---
+
+## Example workflow
+
+A ready-to-use workflow is bundled in [`example_workflows/`](example_workflows/). Drag `NKD Klein Tools.json` straight into ComfyUI to load it, or check the preview image first.
+
 ---
 
 ## Typical workflow
 
+```mermaid
+flowchart LR
+    ML([Model Loader]):::input --> PRE
+    PR([Prompts]):::input --> PRE
+    LI([Load Image]):::input -- ref_0 --> PRE
+    MP([Mask Painter]):::input -- mask --> PRE
+
+    PRE["**NKD Klein**<br/>**Presampling**"]:::nkd
+
+    PRE -- "model · positive<br/>negative · latent" --> SAMP([Your Sampler]):::external
+    PRE -- "ref_0<br/>(preprocessed)" --> REUSE([reuse anywhere<br/>in your graph]):::output
+    PRE -- bundle --> POST
+
+    SAMP --> VAE([VAE Decode]):::external
+    VAE -- image --> POST["**NKD Klein**<br/>**Postsampling**"]:::nkd
+
+    POST --> OUT([final image]):::output
+
+    classDef nkd fill:#3b3b6b,stroke:#8ab4ff,stroke-width:2px,color:#fff
+    classDef input fill:#2d2d2d,stroke:#888,color:#eee
+    classDef external fill:#2d2d2d,stroke:#888,color:#eee
+    classDef output fill:#1f4a1f,stroke:#7fd97f,color:#fff
 ```
-NKD Flux Klein Loader
-    ├── model ──────────────────┐
-    ├── clip ───────────────────┤
-    └── vae ────────────────────┤
-                                ▼
-Load Image ──────── ref_0   NKD Klein Presampling ──── model ──► [your sampler]
-Mask Painter ────── mask                          ──── positive ─►     │
-                                                  ──── negative ─►     │
-                                                  ──── latent ───► [your sampler]
-                                                  ──── bundle ────────────────────┐
-                                                                                  │
-                                                       [your sampler] ──► VAEDecode
-                                                                                │
-                                                       NKD Klein Postsampling ◄──┘
-                                                              │
-                                                              └──► final image
-```
+
+The `bundle` output carries everything Postsampling needs to put the image back where it belongs (crop boxes, masks, the original reference, mode…). You don't need to look inside it — just connect it straight through.
 
 ---
 
