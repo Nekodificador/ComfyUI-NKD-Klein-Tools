@@ -130,7 +130,7 @@ class NKDKleinPresampling(io.ComfyNode):
                     ),
                     display_name="Bypass Reference"),
 
-                io.Int.Input("reference_strength", default=0, min=-3, max=10, step=1,
+                io.Int.Input("reference_strength", default=0, min=-2, max=10, step=1,
                     tooltip=(
                         "How tightly the result follows the layout of your reference "
                         "image. 0 is the default (balanced — good for most edits). "
@@ -140,6 +140,7 @@ class NKDKleinPresampling(io.ComfyNode):
                         "to reinterpret what it sees."
                     ),
                     display_name="Reference Strength"),
+
 
                 # ---- reference images (autogrow) ----
                 io.Autogrow.Input(
@@ -463,7 +464,7 @@ class NKDKleinPresampling(io.ComfyNode):
         # and reverts automatically when ComfyUI unpatches the model.
         if reference_strength != 0 and not bypass_reference:
             _REF_INDEX_SCALE_MAP = {
-                -3: 30.0, -2: 22.0, -1: 15.0,
+                -2: 15.0, -1: 13.0,
                  0: 10.0,
                  1: 8.5,   2: 7.0,  3: 6.0,  4: 5.0,  5: 4.0,
                  6: 3.5,   7: 3.0,  8: 2.5,  9: 2.0, 10: 1.5,
