@@ -2,8 +2,11 @@
 
 A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. Plug in your model, drop an image, write a prompt, and go — no manual wiring of internal pieces. Whether you want to generate from scratch, transform an existing photo, paint over a specific area, or zoom in for a high-detail touch-up, the same two nodes handle it all.
 
-<img width="2219" height="1001" alt="image" src="https://github.com/user-attachments/assets/70a51042-42a9-40f8-8e2e-4230feeba097" />
 
+>   [**Full introduction tutorial**](https://youtu.be/8wBXI-QCy0w)
+
+
+<img width="2219" height="1001" alt="image" src="https://github.com/user-attachments/assets/70a51042-42a9-40f8-8e2e-4230feeba097" />
 ---
 
 ## What's new in 1.8.x
