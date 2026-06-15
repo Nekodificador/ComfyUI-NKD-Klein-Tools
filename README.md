@@ -127,12 +127,6 @@ The **😺NKD Klein Reference Weight** node lets you turn **one** reference imag
 - **Reference Weight** — `1.0` leaves the reference as usual. Below `1` fades it out (`0` = ignored completely); above `1` makes it show up more (up to `2`).
 - **schedule** *(optional)* — connect the **FLOAT** output of **NKD Sigmas Curve** to change the weight over the course of the generation. For example, a curve that starts high and drops to zero lets a reference set the overall look at the start, then step aside so it doesn't take over the fine details. Leave it unconnected to keep the same weight throughout. It behaves the same whichever scheduler you use.
 
-**Example — borrow the lighting from a second image**
-
-![Reference Weight example](docs/reference_weight_example.png)
-
-Here ref_0 is the original portrait and ref_1 is a version with dramatic purple lighting. Prompt: *"migrate the light from image 2, the teeth shine."* The Reference Weight node targets ref_1 at weight `2.0` with a curve that starts strong and fades out, so the second image's lighting sets the mood early without distorting the rest. The result keeps the original framing but takes on the purple relight and the shiny teeth.
-
 ### Postsampling clean-up
 
 These live on the Postsampling node and fine-tune how the regenerated area is composited back over the original.
