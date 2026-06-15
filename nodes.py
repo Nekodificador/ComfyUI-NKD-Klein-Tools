@@ -1,9 +1,12 @@
 from __future__ import annotations
 from typing import Optional
+import logging
 import torch
 from comfy_api.latest import io
 from .klein_types import KleinBundle, NKDKleinBundleType
 from .helpers import (
+    _HAS_CV2,
+    REF_INDEX_SCALE_MAP,
     _resize,
     _resize_mask,
     _mask_grow,
@@ -11,6 +14,7 @@ from .helpers import (
     _uncrop,
     _encode_reference_latent,
     _apply_reference_latent,
+    _set_reference_method,
     _resolve_resolution,
     _megapixels_to_pixels,
     _fit_image_to_canvas,
@@ -417,21 +421,47 @@ class NKDKleinPresampling(io.ComfyNode):
             # native aspect — Klein handles references whose dimensions
             # differ from the canvas natively, so no distortion gets baked
             # into the output.
+            applied_reference = False
+            ref0_latent = None       # the latent ref_0 was encoded as (the grid to match)
             if primary_latent is not None:
                 pos = _apply_reference_latent(pos, primary_latent)
                 neg = _apply_reference_latent(neg, primary_latent)
+                ref0_latent = primary_latent
+                applied_reference = True
             elif ref_0 is not None:
-                ref_latent = _encode_reference_latent(ref_0, vae)
-                pos = _apply_reference_latent(pos, ref_latent)
-                neg = _apply_reference_latent(neg, ref_latent)
+                ref0_latent = _encode_reference_latent(ref_0, vae)
+                pos = _apply_reference_latent(pos, ref0_latent)
+                neg = _apply_reference_latent(neg, ref0_latent)
+                applied_reference = True
 
-            # Additional references (ref_1, ref_2, …) are user-supplied raw
-            # images and may be arbitrarily large — keep the 1MP clamp on them
-            # to bound VAE memory.
+            # Additional references (ref_1, ref_2, …) must share ref_0's latent
+            # grid. ref_0's reference latent is NOT always canvas-sized — in the
+            # Compose path it's encoded at its native aspect (see the elif above),
+            # and in detailing it's the crop. Under the "index" reference method
+            # each reference is aligned by layer, so a mismatched grid surfaces as
+            # spatial misalignment. Derive the target pixel dims from ref_0's
+            # actual latent (latent H×W × VAE factor 16) and resize ref_1+ to it,
+            # so every reference lands on exactly the same grid as ref_0.
+            if ref0_latent is not None:
+                ref_h = ref0_latent.shape[2] * 16
+                ref_w = ref0_latent.shape[3] * 16
+            else:
+                ref_h, ref_w = height, width
             for ref_img in refs[1:]:
-                ref_latent = _encode_reference_latent(ref_img, vae)
+                ref_aligned = _resize(ref_img, ref_w, ref_h)
+                ref_latent = _encode_reference_latent(ref_aligned, vae, skip_clamp=True)
                 pos = _apply_reference_latent(pos, ref_latent)
                 neg = _apply_reference_latent(neg, ref_latent)
+                applied_reference = True
+
+            # Use the "index" reference method (not Flux2's "offset" default):
+            # it aligns each reference to the canvas in its own positional layer
+            # — no mixed-resolution spatial overlap — and makes ref_index_scale
+            # the real per-reference strength lever that reference_strength and
+            # the Ref Schedule nodes drive.
+            if applied_reference:
+                pos = _set_reference_method(pos, "index")
+                neg = _set_reference_method(neg, "index")
 
         # 8. Apply DifferentialDiffusion when a mask is present (inpainting or detailing).
         model = model.clone()
@@ -463,13 +493,7 @@ class NKDKleinPresampling(io.ComfyNode):
         # Applied via add_object_patch so the change is scoped to this sample
         # and reverts automatically when ComfyUI unpatches the model.
         if reference_strength != 0 and not bypass_reference:
-            _REF_INDEX_SCALE_MAP = {
-                -2: 15.0, -1: 13.0,
-                 0: 10.0,
-                 1: 8.5,   2: 7.0,  3: 6.0,  4: 5.0,  5: 4.0,
-                 6: 3.5,   7: 3.0,  8: 2.5,  9: 2.0, 10: 1.5,
-            }
-            new_scale = _REF_INDEX_SCALE_MAP.get(int(reference_strength), 10.0)
+            new_scale = REF_INDEX_SCALE_MAP.get(int(reference_strength), 10.0)
             try:
                 model.add_object_patch("diffusion_model.params.ref_index_scale", new_scale)
             except Exception:
@@ -663,6 +687,17 @@ class NKDKleinPostsampling(io.ComfyNode):
         extend_to_borders: bool = True,
     ) -> io.NodeOutput:
 
+        # Warn (don't crash) when a requested feature needs OpenCV but it isn't
+        # installed — the underlying helpers fall back to a plain alpha blend,
+        # which silently degrades quality. Surfacing it here tells the user why.
+        if (seamless_edges or auto_detect_edit_region) and not _HAS_CV2:
+            logging.getLogger(__name__).warning(
+                "NKD Klein Postsampling: '%s' requested but OpenCV (cv2) is not "
+                "installed — falling back to a basic blend. Install opencv-python "
+                "for seamless edges / auto-detect.",
+                "Seamless Edges" if seamless_edges else "Auto-Detect Edit Region",
+            )
+
         post_blend_needed = match_original_colors > 0.0 or seamless_edges
 
         # Case 1: detailing crop → recompose onto ref_0 at native full resolution.
@@ -699,8 +734,8 @@ class NKDKleinPostsampling(io.ComfyNode):
                 alpha = mask_2d.unsqueeze(-1)
             composite = sampled * alpha + orig * (1.0 - alpha)
             if post_blend_needed:
-                composite = _apply_post_blend_masked(
-                    orig, composite, mask_2d, match_original_colors, seamless_edges,
+                composite = _apply_post_blend(
+                    orig, composite, match_original_colors, seamless_edges, mask=mask_2d,
                 )
             debug = _difference_debug(composite, orig)
             return io.NodeOutput(composite, debug)
@@ -736,36 +771,26 @@ def _difference_debug(composite: torch.Tensor, original: torch.Tensor, gain: flo
 
 
 def _apply_post_blend(orig: torch.Tensor, composite: torch.Tensor,
-                      match_strength: float, seamless: bool) -> torch.Tensor:
-    """Re-blend the entire composite with color match + optional Poisson, using the
-    auto-detected difference between orig and composite as the alpha. Used by the
-    detail-crop path where the binary uncrop mask is already burnt in but the seam
-    can still show through as a color shift."""
+                      match_strength: float, seamless: bool,
+                      mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """Re-blend the composite with color match + optional Poisson.
+
+    When `mask` is given (inpaint path) it is used directly as the alpha. When
+    it's None (detail-crop path) the alpha is auto-derived from where orig and
+    composite differ — there the binary uncrop mask is already burnt in but the
+    seam can still show through as a color shift. Either way, an empty mask
+    returns the composite unchanged so seamlessClone never hits a zero rect."""
     import numpy as np
-    if orig.shape != composite.shape:
+    if mask is None and orig.shape != composite.shape:
         orig = _resize(orig, composite.shape[2], composite.shape[1])
     orig_np = _tensor_to_np(orig)
     comp_np = _tensor_to_np(composite)
-    diff = np.abs(orig_np - comp_np).max(axis=-1)
-    mask = (diff > 0.01).astype(np.float32)
-    if mask.sum() < 1:
-        return composite
-    valid = np.ones_like(mask, dtype=np.float32)
-    out = _composite_with_options(orig_np, comp_np, mask, valid, match_strength, seamless)
-    return _np_to_tensor(out, composite.device, composite.dtype)
-
-
-def _apply_post_blend_masked(orig: torch.Tensor, composite: torch.Tensor,
-                             mask: torch.Tensor,
-                             match_strength: float, seamless: bool) -> torch.Tensor:
-    """Same as _apply_post_blend but uses the supplied mask (inpaint path) instead of
-    auto-deriving one. Skips the seamless clone if the mask is empty so we don't crash
-    seamlessClone on a zero bounding rect."""
-    import numpy as np
-    orig_np = _tensor_to_np(orig)
-    comp_np = _tensor_to_np(composite)
-    m = mask[0] if mask.dim() == 3 else mask
-    mask_np = m.detach().clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
+    if mask is not None:
+        m = mask[0] if mask.dim() == 3 else mask
+        mask_np = m.detach().clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
+    else:
+        diff = np.abs(orig_np - comp_np).max(axis=-1)
+        mask_np = (diff > 0.01).astype(np.float32)
     if mask_np.sum() < 1:
         return composite
     valid = np.ones_like(mask_np, dtype=np.float32)

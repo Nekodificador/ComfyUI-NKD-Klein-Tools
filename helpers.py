@@ -1,8 +1,25 @@
 from __future__ import annotations
 from typing import Optional, Tuple
 import math
+import numpy as np
 import torch
 import torch.nn.functional as F
+
+
+# ---------------------------------------------------------------------------
+# Optional-dependency capability probes. Computed once at import so callers can
+# warn the user when a requested feature would silently degrade because a
+# package isn't installed, instead of quietly falling back. These are *not*
+# hard imports — a missing package must never break loading the node pack.
+# ---------------------------------------------------------------------------
+
+def _probe(module_name: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(module_name) is not None
+
+
+_HAS_CV2 = _probe("cv2")
+_HAS_KORNIA = _probe("kornia")
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +70,6 @@ def _outpaint_fill(canvas: torch.Tensor, content: torch.Tensor,
     if fill == "smart":
         try:
             import cv2
-            import numpy as np
             out = canvas[0].clamp(0, 1).cpu().numpy()
             out[y_off:y_off + new_h, x_off:x_off + new_w, :] = (
                 content[0].clamp(0, 1).cpu().numpy()
@@ -637,11 +653,15 @@ def _uncrop(
 # ReferenceLatent
 # ---------------------------------------------------------------------------
 
-def _encode_reference_latent(ref_image: torch.Tensor, vae, skip_clamp: bool = False) -> torch.Tensor:
+def _encode_reference_latent(ref_image: torch.Tensor, vae, skip_clamp: bool = False,
+                             target_pixels: int = 1_048_576) -> torch.Tensor:
     """Encode an image as a Klein reference latent.
 
-    By default the input is clamped to 1MP to keep the VAE memory footprint
-    bounded for raw user references that may be arbitrarily large.
+    By default the input is clamped to `target_pixels` to keep the VAE memory
+    footprint bounded for raw user references that may be arbitrarily large.
+    Pass the canvas megapixel budget here so additional references (ref_1+)
+    land on the same scale as ref_0 — under the "index" reference method a
+    mismatched grid shows up as spatial misalignment between references.
 
     When `skip_clamp=True` the image is passed to the VAE as-is. Use this when
     the input is already a sampler-bound tensor (e.g. the detailer crop_img):
@@ -651,7 +671,7 @@ def _encode_reference_latent(ref_image: torch.Tensor, vae, skip_clamp: bool = Fa
     grid → no drift."""
     if skip_clamp:
         return vae.encode(ref_image[:, :, :, :3])
-    rw, rh = _clamp_to_megapixel(ref_image.shape[2], ref_image.shape[1])
+    rw, rh = _clamp_to_megapixel(ref_image.shape[2], ref_image.shape[1], target_pixels)
     img = _resize(ref_image, rw, rh)
     return vae.encode(img[:, :, :, :3])
 
@@ -664,6 +684,41 @@ def _apply_reference_latent(conditioning: list, ref_latent: torch.Tensor) -> lis
         {"reference_latents": [ref_latent]},
         append=True,
     )
+
+
+def _set_reference_method(conditioning: list, method: str = "index") -> list:
+    """Set the Flux2 reference latent method on the conditioning.
+
+    Flux2 defaults to "offset", which lays references out spatially beside the
+    canvas — with mixed-resolution refs that produces visible overlap, and it
+    ignores ref_index_scale entirely. "index" instead places each reference in
+    its own positional layer aligned to the canvas (no spatial overlap) and
+    makes ref_index_scale the real per-reference strength lever, which is what
+    the NKD Ref Schedule nodes drive. Set once (not appended) — it's a scalar."""
+    import node_helpers
+    return node_helpers.conditioning_set_values(
+        conditioning,
+        {"reference_latents_method": method},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Presampling reference_strength -> ref_index_scale mapping.
+#
+# Klein/Flux2 use ref_index_scale to set the positional (RoPE) distance between
+# a reference's tokens and the canvas. LOWER scale = tighter anchor = stronger
+# reference; HIGHER = more interpretive freedom. Klein ships at 10.0. This maps
+# Presampling's integer reference_strength (-2..10) to that scale. (NOTE: this
+# is the POSITIONAL anchor lever; the per-reference attention WEIGHT lever lives
+# in ref_schedule.py and scales k/v instead — different mechanism entirely.)
+# ---------------------------------------------------------------------------
+
+REF_INDEX_SCALE_MAP = {
+    -2: 15.0, -1: 13.0,
+     0: 10.0,
+     1: 8.5,   2: 7.0,  3: 6.0,  4: 5.0,  5: 4.0,
+     6: 3.5,   7: 3.0,  8: 2.5,  9: 2.0, 10: 1.5,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -684,12 +739,10 @@ def _pct_px(pct: float, diag: float) -> int:
 
 
 def _tensor_to_np(image: torch.Tensor):
-    import numpy as np
     return image[0, :, :, :3].detach().clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
 
 
 def _np_to_tensor(arr, device, dtype) -> torch.Tensor:
-    import numpy as np
     t = torch.from_numpy(np.ascontiguousarray(arr)).to(device=device, dtype=dtype)
     return t.unsqueeze(0)
 
@@ -700,7 +753,6 @@ def _np_to_tensor(arr, device, dtype) -> torch.Tensor:
 # Klein shifts. The float versions below stay in float32 throughout.
 
 def _rgb_to_lab(rgb):
-    import numpy as np
     lin = np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
     M = np.array([
         [0.4124564, 0.3575761, 0.1804375],
@@ -722,7 +774,6 @@ def _rgb_to_lab(rgb):
 
 
 def _lab_to_rgb(lab):
-    import numpy as np
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
     fy = (L + 16.0) / 116.0
     fx = a / 500.0 + fy
@@ -753,7 +804,6 @@ def _reinhard_match(orig_rgb, gen_rgb, composite_mask, valid_mask, strength):
     """Match gen's color statistics to orig using only background pixels.
     Returns gen unchanged when the background is too small to be reliable —
     matching on the edit region itself would just propagate the shift."""
-    import numpy as np
     if strength <= 0.0:
         return gen_rgb
     bg = (composite_mask < 0.05) & (valid_mask > 0.5)
@@ -775,7 +825,6 @@ def _reinhard_match(orig_rgb, gen_rgb, composite_mask, valid_mask, strength):
 
 def _hybrid_diff(orig_rgb, gen_rgb, blur_k):
     import cv2
-    import numpy as np
     o_blur = cv2.GaussianBlur(orig_rgb, blur_k, 0)
     g_blur = cv2.GaussianBlur(gen_rgb, blur_k, 0)
     o_lab = _rgb_to_lab(o_blur)
@@ -802,7 +851,6 @@ def _hybrid_diff(orig_rgb, gen_rgb, blur_k):
 # ---- MAD auto-threshold (global + local) ------------------------------------
 
 def _mad_threshold(diff, valid, k=6.0, lo=3.0, hi=60.0):
-    import numpy as np
     sample = diff[valid > 0.5] if (valid is not None and valid.sum() > 100) else diff.ravel()
     if sample.size > 50000:
         sample = np.random.choice(sample, 50000, replace=False)
@@ -813,7 +861,6 @@ def _mad_threshold(diff, valid, k=6.0, lo=3.0, hi=60.0):
 
 def _local_threshold(diff, valid, diag, k=6.0, lo=3.0, hi=60.0):
     import cv2
-    import numpy as np
     r = max(15, int(round(diag * 0.06)))
     if r % 2 == 0:
         r += 1
@@ -837,7 +884,6 @@ def _sift_align(gray_orig, gray_gen, gen_rgb, restrict_mask=None):
     Returns (aligned_rgb, valid_mask, n_inliers). Falls back to identity when
     matching fails so the pipeline can still proceed."""
     import cv2
-    import numpy as np
     H, W = gray_orig.shape[:2]
     valid_fallback = np.ones((H, W), dtype=np.float32)
 
@@ -891,7 +937,6 @@ def _dis_flow(gray_a, gray_b):
 
 def _flow_warp(image, flow):
     import cv2
-    import numpy as np
     h, w = flow.shape[:2]
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     return cv2.remap(image, (xx + flow[..., 0]).astype(np.float32),
@@ -903,7 +948,6 @@ def _flow_warp(image, flow):
 
 def _mask_grow_px(mask, grow_px):
     import cv2
-    import numpy as np
     if grow_px == 0:
         return mask
     r = abs(grow_px)
@@ -914,7 +958,6 @@ def _mask_grow_px(mask, grow_px):
 
 def _mask_fill_holes(mask):
     import cv2
-    import numpy as np
     binary = (mask > 0.5).astype(np.uint8)
     h, w = binary.shape
     n, labeled = cv2.connectedComponents(binary, connectivity=8)
@@ -933,7 +976,6 @@ def _mask_bleed_to_invalid(mask, valid):
     """Extend the mask into the SIFT void border (pixels with no source data)
     so the original doesn't peek through as a thin frame."""
     import cv2
-    import numpy as np
     invalid = (valid < 0.5).astype(np.uint8)
     if invalid.max() == 0:
         return mask
@@ -955,7 +997,6 @@ def _mask_feather(mask, feather_px):
     """Distance-transform based feather with smoothstep falloff — softer and
     more uniform than a gaussian blur on a binary mask."""
     import cv2
-    import numpy as np
     if feather_px <= 0:
         return mask.astype(np.float32)
     inv = (mask < 0.5).astype(np.uint8)
@@ -975,7 +1016,6 @@ def _seamless_clone(orig_rgb, gen_rgb, mask):
     image boundary, and the bounding-rect centre matches what seamlessClone
     computes internally — using numpy min/max instead shifts the result by 1px."""
     import cv2
-    import numpy as np
     o_u8 = (np.clip(orig_rgb, 0, 1) * 255).astype(np.uint8)
     g_u8 = (np.clip(gen_rgb, 0, 1) * 255).astype(np.uint8)
     binary = (mask > 0.1).astype(np.uint8) * 255
@@ -1001,9 +1041,7 @@ def _composite_with_options(orig_rgb, gen_rgb, mask_float, valid_mask,
     """Apply Reinhard match (if enabled) then either alpha or Poisson blend.
     Centralises the final blend stage so Cases 1/2/4 in Postsampling all go
     through the same code path."""
-    import numpy as np
     if valid_mask is None:
-        import numpy as np
         valid_mask = np.ones_like(mask_float, dtype=np.float32)
     gen_matched = _reinhard_match(orig_rgb, gen_rgb, mask_float, valid_mask, color_match_strength)
     if seamless:
@@ -1023,7 +1061,6 @@ def _auto_detect_composite(orig_rgb, gen_rgb,
     The sharp mask is the pre-feather binary detection — useful for the debug
     output. The composite mask is the feathered alpha actually used to blend."""
     import cv2
-    import numpy as np
 
     h, w = orig_rgb.shape[:2]
     diag = _diag_px(h, w)

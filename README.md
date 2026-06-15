@@ -1,6 +1,6 @@
 # NKD Klein Tools
 
-A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. Plug in your model, drop an image, write a prompt, and go — no manual wiring of internal pieces. Whether you want to generate from scratch, transform an existing photo, paint over a specific area, or zoom in for a high-detail touch-up, the same two nodes handle it all.
+ComfyUI nodes that turn a Flux Klein workflow into something simple. Plug in your model, drop an image, write a prompt, and go — no manual wiring of internal pieces. Whether you want to generate from scratch, transform an existing photo, paint over a specific area, or zoom in for a high-detail touch-up, a couple of nodes handle it all. There's also an optional node to control how much each reference image shows up in the result.
 
 
 >   [**Full introduction tutorial**](https://youtu.be/8wBXI-QCy0w)
@@ -8,6 +8,11 @@ A pair of ComfyUI nodes that turn a Flux Klein workflow into something simple. P
 
 <img width="2219" height="1001" alt="image" src="https://github.com/user-attachments/assets/70a51042-42a9-40f8-8e2e-4230feeba097" />
 ---
+
+## What's new in 1.9.x
+
+- **New node: 😺NKD Klein Reference Weight** — when you use more than one reference image, this lets you decide **how much each one shows up** in the result, one at a time. Turn a reference up so it asserts itself, or down so it stops dominating. `1.0` leaves it as usual, lower fades it out (`0` = ignored), higher makes it stronger. You can also connect a curve so a reference is strong at the start and eases off later (handy when you want it to set the mood without taking over the whole image). Optional — only add it when you want that extra control.
+- **Better multi-reference handling** — extra reference images of a different size no longer drift or overlap; they line up cleanly with your main image now.
 
 ## What's new in 1.8.x
 
@@ -47,7 +52,7 @@ The node figures out which mode you're using based on what you connect — no se
 
 ---
 
-## The two nodes
+## The nodes
 
 ### 😺NKD Klein Presampling
 
@@ -57,10 +62,14 @@ The starting point. You connect your model, prompts, and reference image here. I
 
 The end point. It takes the sampler's output and delivers the final image, putting everything back in its place when you've used inpainting or detailing.
 
+### 😺NKD Klein Reference Weight *(optional)*
+
+Sits between Presampling and your sampler. Lets you dial how much a single reference image shows up in the result, one reference at a time. Skip it if you don't need that control. See [Reference Weight](#reference-weight--per-reference-influence) below.
+
 **The chain looks like this:**
 
 ```
-NKD Klein Presampling → [your sampler chain] → NKD Klein Postsampling
+NKD Klein Presampling → (NKD Klein Reference Weight) → [your sampler chain] → NKD Klein Postsampling
 ```
 
 ---
@@ -103,6 +112,23 @@ This is the dial that controls how much creative freedom the model has versus ho
 | **`8` to `10`** | Almost locked to reference | When things absolutely have to line up pixel-for-pixel with the input |
 
 If you're getting unwanted drift between the original and the result (faces shifting, edges not quite aligning), bumping this up usually fixes it. If your generations feel too restrained or "stuck" close to the input, try negative values for more creative leeway.
+
+> **Reference Strength vs Reference Weight — what's the difference?**
+> *Reference Strength* (above) decides how closely the result follows the **layout** of your reference. *Reference Weight* (the separate node below) decides **how much a reference shows up** in the image. Two different dials — you can keep a loose layout but a strong look, or the other way round.
+
+### Reference Weight — per-reference influence
+
+The **😺NKD Klein Reference Weight** node lets you turn **one** reference image up or down without touching the others. Add it on the model line between Presampling and your sampler. Want to control two references separately? Just chain two of these nodes.
+
+- **reference_index** — which reference this node affects. `0` is your main image (ref_0), `1` is ref_1, and so on, in the order you connected them.
+- **Reference Weight** — `1.0` leaves the reference as usual. Below `1` fades it out (`0` = ignored completely); above `1` makes it show up more (up to `2`).
+- **schedule** *(optional)* — connect the **FLOAT** output of **NKD Sigmas Curve** to change the weight over the course of the generation. For example, a curve that starts high and drops to zero lets a reference set the overall look at the start, then step aside so it doesn't take over the fine details. Leave it unconnected to keep the same weight throughout. It behaves the same whichever scheduler you use.
+
+**Example — borrow the lighting from a second image**
+
+![Reference Weight example](docs/reference_weight_example.png)
+
+Here ref_0 is the original portrait and ref_1 is a version with dramatic purple lighting. Prompt: *"migrate the light from image 2, the teeth shine."* The Reference Weight node targets ref_1 at weight `2.0` with a curve that starts strong and fades out, so the second image's lighting sets the mood early without distorting the rest. The result keeps the original framing but takes on the purple relight and the shiny teeth.
 
 ### Postsampling clean-up
 
@@ -164,6 +190,14 @@ These live on the Postsampling node and fine-tune how the regenerated area is co
 1. Drop your main image into `ref_0`.
 2. As you connect, more slots will appear — add up to 8 reference images.
 3. Write a prompt and run.
+
+**Make one reference show up more (or less) than the others**
+1. Set up your references as above.
+2. Add a **NKD Klein Reference Weight** node on the model line, between Presampling and your sampler.
+3. Set **reference_index** to the reference you want to adjust (`0` = ref_0, `1` = ref_1, …).
+4. Turn **Reference Weight** up (toward `2`) to make it show up more, or down (toward `0`) to fade it out.
+5. *(Optional)* connect an **NKD Sigmas Curve** to its `schedule` input to make it strong early and fade later.
+6. Run. Add another Reference Weight node if you want to adjust a second reference too.
 
 **Iteratively edit an image without a mask (keep the rest pixel-perfect)**
 1. Drop your image into `ref_0`.
