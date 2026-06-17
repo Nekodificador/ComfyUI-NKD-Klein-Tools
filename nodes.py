@@ -16,6 +16,7 @@ from .helpers import (
     _apply_reference_latent,
     _set_reference_method,
     _resolve_resolution,
+    _round_vae,
     _megapixels_to_pixels,
     _fit_image_to_canvas,
     _ASPECT_RATIO_OPTIONS,
@@ -58,6 +59,16 @@ class NKDKleinPresampling(io.ComfyNode):
                         "of VRAM."
                     ),
                     display_name="Pin Model"),
+
+                io.Boolean.Input("resize", default=True,
+                    tooltip=(
+                        "On (default): the node sizes the image for you from Aspect "
+                        "Ratio and Megapixels. Off: the node leaves every image at "
+                        "its own size and works at your input image's native size — "
+                        "use this when you want to handle sizing yourself elsewhere. "
+                        "Turning it off hides Aspect Ratio and Megapixels."
+                    ),
+                    display_name="Resize"),
 
                 # ---- resolution ----
                 io.Combo.Input("aspect_ratio",
@@ -256,6 +267,7 @@ class NKDKleinPresampling(io.ComfyNode):
         inpaint_blend: float = 1.0,
         bypass_reference: bool = False,
         pin_model: bool = False,
+        resize: bool = True,
         use_detailing: bool = False,
         detail_padding: int = 50,
         reference_strength: int = 0,
@@ -283,12 +295,18 @@ class NKDKleinPresampling(io.ComfyNode):
         else:
             mode = "t2i"
 
-        # 2. Resolve canvas resolution from the user's choice (Aspect Ratio +
-        # Megapixels). The mask is resampled to the canvas later, so the
-        # canvas dimensions don't need to match the source image exactly.
-        width, height = _resolve_resolution(
-            aspect_ratio, megapixels, custom_width, custom_height, ref_image=ref_0
-        )
+        # 2. Resolve canvas resolution. With Resize on (default), it comes from
+        # the user's Aspect Ratio + Megapixels. With Resize off, the node makes
+        # no sizing decisions: the canvas takes ref_0's native size (only snapped
+        # to /16 for the VAE) and every reference is left at its own size, so the
+        # user can drive sizing from elsewhere. t2i has no ref_0 to size from, so
+        # it still falls back to the Aspect Ratio + Megapixels resolution there.
+        if resize or ref_0 is None:
+            width, height = _resolve_resolution(
+                aspect_ratio, megapixels, custom_width, custom_height, ref_image=ref_0
+            )
+        else:
+            width, height = _round_vae(ref_0.shape[2]), _round_vae(ref_0.shape[1])
 
         # 3. Canvas-sized image (for VAEEncode / mask alignment / crop background).
         # Detect when the canvas aspect differs from the source aspect — in
@@ -429,27 +447,29 @@ class NKDKleinPresampling(io.ComfyNode):
                 ref0_latent = primary_latent
                 applied_reference = True
             elif ref_0 is not None:
-                ref0_latent = _encode_reference_latent(ref_0, vae)
+                # With Resize off, encode ref_0 at its native size (no 1MP clamp)
+                # so the node makes no sizing decision.
+                ref0_latent = _encode_reference_latent(ref_0, vae, skip_clamp=not resize)
                 pos = _apply_reference_latent(pos, ref0_latent)
                 neg = _apply_reference_latent(neg, ref0_latent)
                 applied_reference = True
 
-            # Additional references (ref_1, ref_2, …) must share ref_0's latent
-            # grid. ref_0's reference latent is NOT always canvas-sized — in the
-            # Compose path it's encoded at its native aspect (see the elif above),
-            # and in detailing it's the crop. Under the "index" reference method
-            # each reference is aligned by layer, so a mismatched grid surfaces as
-            # spatial misalignment. Derive the target pixel dims from ref_0's
-            # actual latent (latent H×W × VAE factor 16) and resize ref_1+ to it,
-            # so every reference lands on exactly the same grid as ref_0.
-            if ref0_latent is not None:
-                ref_h = ref0_latent.shape[2] * 16
-                ref_w = ref0_latent.shape[3] * 16
-            else:
-                ref_h, ref_w = height, width
+            # Additional references (ref_1, ref_2, …).
+            # With Resize on, they must share ref_0's latent grid: ref_0's
+            # reference latent is NOT always canvas-sized (Compose encodes it at
+            # native aspect, detailing uses the crop), and under the "index"
+            # method a mismatched grid surfaces as spatial misalignment, so we
+            # resize ref_1+ to ref_0's exact grid (latent H×W × VAE factor 16).
+            # With Resize off, the node touches no sizes — encode each at native.
             for ref_img in refs[1:]:
-                ref_aligned = _resize(ref_img, ref_w, ref_h)
-                ref_latent = _encode_reference_latent(ref_aligned, vae, skip_clamp=True)
+                if resize and ref0_latent is not None:
+                    ref_aligned = _resize(ref_img, ref0_latent.shape[3] * 16, ref0_latent.shape[2] * 16)
+                    ref_latent = _encode_reference_latent(ref_aligned, vae, skip_clamp=True)
+                elif resize:
+                    ref_aligned = _resize(ref_img, width, height)
+                    ref_latent = _encode_reference_latent(ref_aligned, vae, skip_clamp=True)
+                else:
+                    ref_latent = _encode_reference_latent(ref_img, vae, skip_clamp=True)
                 pos = _apply_reference_latent(pos, ref_latent)
                 neg = _apply_reference_latent(neg, ref_latent)
                 applied_reference = True

@@ -26,6 +26,26 @@ function migrateLegacyMegapixels(node) {
     }
 }
 
+// A node saved before the "resize" input existed loads with its widgets/inputs
+// out of sync with the new definition (positions shifted). Detect that — the
+// telltale is a Presampling node with no "resize" widget — and tell the user to
+// refresh it. Shown once per stale node.
+function warnIfStalePresampling(node) {
+    if (node._nkd_stale_warned) return;
+    const hasResize = node.widgets?.some(w => w.name === "resize");
+    if (hasResize) return;
+    node._nkd_stale_warned = true;
+    app.extensionManager?.toast?.add?.({
+        severity: "warn",
+        summary: "NKD Klein Presampling — node out of date",
+        detail:
+            "This node was saved with an older version and its inputs/widgets " +
+            "are out of sync. Right-click it and choose 'Fix node (recreate)', " +
+            "or delete it and add it again, to refresh the layout.",
+        life: 12000,
+    });
+}
+
 const MASK_DEPENDENT_WIDGETS = [
     "mask_expand",
     "mask_blur",
@@ -59,30 +79,49 @@ function isRefConnected(node) {
     );
 }
 
-// image_fit / bypass_reference / reference_strength only do anything when a
-// reference image is connected — hide them otherwise to keep the node clean.
-const REF_DEPENDENT_WIDGETS = [
-    "image_fit",
-    "bypass_reference",
-    "reference_strength",
-];
+function getWidgetValue(node, name) {
+    return node.widgets?.find(w => w.name === name)?.value;
+}
 
-function updateRefDependentWidgets(node) {
-    const connected = isRefConnected(node);
-    for (const name of REF_DEPENDENT_WIDGETS) {
-        const widget = node.widgets?.find(w => w.name === name);
-        if (!widget) continue;
-        if (connected) showWidget(widget);
-        else hideWidget(widget);
+function setWidgetVisible(node, name, visible) {
+    const w = node.widgets?.find(x => x.name === name);
+    if (!w) return;
+    if (visible) showWidget(w); else hideWidget(w);
+}
+
+// Master visibility pass for the resolution / reference area. Driven by:
+//  - resize: when off, the node makes no sizing decision, so Aspect Ratio,
+//    Megapixels, Custom W/H and Image Fit (and its dependents) are all hidden.
+//  - reference connected: bypass_reference / reference_strength only matter then.
+//  - aspect_ratio: Custom W/H only for "Custom"; Image Fit only when the ratio
+//    can differ from the source (i.e. NOT "As Reference").
+function updateResolutionWidgets(node) {
+    const resize    = getWidgetValue(node, "resize") !== false;   // default on
+    const refOn     = isRefConnected(node);
+    const aspect    = getWidgetValue(node, "aspect_ratio");
+
+    // Sizing controls — only when Resize is on.
+    setWidgetVisible(node, "aspect_ratio", resize);
+    setWidgetVisible(node, "megapixels", resize);
+    setWidgetVisible(node, "custom_width",  resize && aspect === "Custom");
+    setWidgetVisible(node, "custom_height", resize && aspect === "Custom");
+
+    // Reference-only controls.
+    setWidgetVisible(node, "bypass_reference", refOn);
+    setWidgetVisible(node, "reference_strength", refOn);
+
+    // Image Fit only does something when the canvas ratio can differ from the
+    // source: needs Resize on, a reference connected, and a non-"As Reference"
+    // ratio. Its dependents (outpaint_fill / slide) follow the chosen fit.
+    const fitVisible = resize && refOn && aspect !== "As Reference";
+    setWidgetVisible(node, "image_fit", fitVisible);
+    if (fitVisible) {
+        updateOutpaintFillWidget(node);
+    } else {
+        setWidgetVisible(node, "outpaint_fill", false);
+        setWidgetVisible(node, "slide", false);
     }
-    // outpaint_fill / slide depend on image_fit, which is itself ref-dependent.
-    if (connected) updateOutpaintFillWidget(node);
-    else {
-        for (const n of ["outpaint_fill", "slide"]) {
-            const w = node.widgets?.find(x => x.name === n);
-            if (w) hideWidget(w);
-        }
-    }
+
     node.setSize(node.computeSize());
     node.setDirtyCanvas(true, true);
 }
@@ -118,24 +157,6 @@ function updateDetailingWidgets(node) {
     const detailingOn = useDetailingWidget.value === true;
     if (detailingOn) showWidget(paddingWidget);
     else hideWidget(paddingWidget);
-    node.setSize(node.computeSize());
-    node.setDirtyCanvas(true, true);
-}
-
-function updateCustomSizeWidgets(node) {
-    const aspectWidget = node.widgets?.find(w => w.name === "aspect_ratio");
-    const widthWidget  = node.widgets?.find(w => w.name === "custom_width");
-    const heightWidget = node.widgets?.find(w => w.name === "custom_height");
-    if (!aspectWidget || !widthWidget || !heightWidget) return;
-
-    const visible = aspectWidget.value === "Custom";
-    if (visible) {
-        showWidget(widthWidget);
-        showWidget(heightWidget);
-    } else {
-        hideWidget(widthWidget);
-        hideWidget(heightWidget);
-    }
     node.setSize(node.computeSize());
     node.setDirtyCanvas(true, true);
 }
@@ -192,8 +213,7 @@ app.registerExtension({
             nodeType.prototype.onNodeCreated = function () {
                 origOnCreated?.apply(this, arguments);
                 requestAnimationFrame(() => {
-                    updateCustomSizeWidgets(this);
-                    updateRefDependentWidgets(this);
+                    updateResolutionWidgets(this);
                     updateMaskWidgets(this);
                 });
             };
@@ -203,27 +223,30 @@ app.registerExtension({
                 origOnConfigure?.apply(this, arguments);
                 // Run after the widget values have been restored from the workflow.
                 requestAnimationFrame(() => {
+                    warnIfStalePresampling(this);
                     migrateLegacyMegapixels(this);
-                    updateRefDependentWidgets(this);
+                    updateResolutionWidgets(this);
                 });
             };
 
             const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
             nodeType.prototype.onWidgetChanged = function (name, value) {
                 origOnWidgetChanged?.apply(this, arguments);
-                if (name === "aspect_ratio")  updateCustomSizeWidgets(this);
+                if (name === "resize" || name === "aspect_ratio" || name === "image_fit") {
+                    updateResolutionWidgets(this);
+                }
                 if (name === "use_detailing") updateDetailingWidgets(this);
-                if (name === "image_fit")     updateOutpaintFillWidget(this);
             };
 
             const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
             nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
                 origOnConnectionsChange?.apply(this, arguments);
                 // type 1 = input connection change. Refresh both the mask-driven
-                // widgets and the ref-driven ones (ref_* slots are Autogrow inputs).
+                // widgets and the resolution/ref-driven ones (ref_* slots are
+                // Autogrow inputs).
                 if (type === 1) {
                     updateMaskWidgets(this);
-                    updateRefDependentWidgets(this);
+                    updateResolutionWidgets(this);
                 }
             };
             return;

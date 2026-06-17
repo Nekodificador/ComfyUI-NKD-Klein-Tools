@@ -21,10 +21,7 @@ optional per-step curve. Chainable — each node adds its own stateless patch, s
 you can drive several references with separate nodes.
 """
 from __future__ import annotations
-import logging
 from comfy_api.latest import io
-
-_LOG = logging.getLogger(__name__)
 
 # UI weight is 0..2 with 1.0 = neutral. Values >1 strengthen, <1 weaken. The
 # k/v scale applied internally is this same factor (identity map): scaling k and
