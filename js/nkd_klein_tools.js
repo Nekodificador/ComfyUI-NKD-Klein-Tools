@@ -55,15 +55,75 @@ const MASK_DEPENDENT_WIDGETS = [
 ];
 
 function hideWidget(widget) {
-    widget.hidden = true;
+    widget.hidden = true;                              // classic canvas render (1.0)
+    if (widget.options) widget.options.hidden = true;  // Vue layout render (2.0)
     widget._nkd_hidden = true;
-    widget.computeSize = () => [0, -4];
+    widget.computeSize = () => [0, -4];                // collapse the gap on canvas (1.0)
 }
 
 function showWidget(widget) {
     widget.hidden = false;
+    if (widget.options) widget.options.hidden = false;
     widget._nkd_hidden = false;
     delete widget.computeSize;
+}
+
+// Push visibility changes to BOTH renderers.
+//  - Classic canvas (1.0): recompute the node size so hidden widgets (whose
+//    computeSize returns [0,-4]) collapse their row.
+//  - Vue nodes (2.0): the node's widget list is a cached snapshot behind a
+//    shallowReactive array, and that snapshot CLONES options.hidden — so a plain
+//    `options.hidden` mutation is never observed. Re-assigning node.widgets
+//    through the reactive setter forces a re-extract (the same trick the
+//    frontend itself uses for inputs/outputs on deep changes). On 1.0 this is a
+//    harmless reassignment with identical widget refs.
+function refreshNode(node) {
+    if (Array.isArray(node.widgets)) {
+        node.widgets = [...node.widgets];           // invalidate the 2.0 widget snapshot
+    }
+    // Force the Vue (2.0) node to re-render its widget area. Editing a widget
+    // does this for free (its store value changes), but a CONNECTION change does
+    // not — the visibility we just set would only appear after the next unrelated
+    // edit. Re-emit a no-op property change (bgcolor → itself): the frontend's
+    // useGraphNodeManager re-sets this node's reactive data, which re-reads the
+    // freshly-invalidated widget snapshot. This is the same trigger the frontend
+    // uses internally (useNodeErrorFlagSync). No-op on the classic canvas (1.0).
+    node.graph?.trigger?.("node:property:changed", {
+        type: "node:property:changed",
+        nodeId: node.id,
+        property: "bgcolor",
+        oldValue: node.bgcolor,
+        newValue: node.bgcolor,
+    });
+    node.setSize(node.computeSize());
+    node.setDirtyCanvas(true, true);
+}
+
+// Drive a visibility refresh from a widget's own callback. This is the only
+// hook that fires in BOTH renderers: the classic canvas calls widget.callback
+// on edit, and Vue nodes route edits through createWidgetUpdateHandler →
+// widget.callback (they do NOT call node.onWidgetChanged). Idempotent per widget.
+function wrapWidgetCallback(node, name, handler) {
+    const w = node.widgets?.find(x => x.name === name);
+    if (!w || w._nkd_cb_wrapped) return;
+    const orig = w.callback;
+    w.callback = function () {
+        const r = orig?.apply(this, arguments);
+        handler(node);
+        return r;
+    };
+    w._nkd_cb_wrapped = true;
+}
+
+function setupPresamplingTriggers(node) {
+    wrapWidgetCallback(node, "resize", updateResolutionWidgets);
+    wrapWidgetCallback(node, "aspect_ratio", updateResolutionWidgets);
+    wrapWidgetCallback(node, "image_fit", updateResolutionWidgets);
+    wrapWidgetCallback(node, "use_detailing", updateDetailingWidgets);
+}
+
+function setupPostsamplingTriggers(node) {
+    wrapWidgetCallback(node, "auto_detect_edit_region", updateAutoDetectWidgets);
 }
 
 function isMaskConnected(node) {
@@ -122,8 +182,7 @@ function updateResolutionWidgets(node) {
         setWidgetVisible(node, "slide", false);
     }
 
-    node.setSize(node.computeSize());
-    node.setDirtyCanvas(true, true);
+    refreshNode(node);
 }
 
 function updateMaskWidgets(node) {
@@ -145,8 +204,7 @@ function updateMaskWidgets(node) {
     }
     // detail_padding visibility also depends on use_detailing
     if (connected) updateDetailingWidgets(node);
-    node.setSize(node.computeSize());
-    node.setDirtyCanvas(true, true);
+    refreshNode(node);
 }
 
 function updateDetailingWidgets(node) {
@@ -157,8 +215,7 @@ function updateDetailingWidgets(node) {
     const detailingOn = useDetailingWidget.value === true;
     if (detailingOn) showWidget(paddingWidget);
     else hideWidget(paddingWidget);
-    node.setSize(node.computeSize());
-    node.setDirtyCanvas(true, true);
+    refreshNode(node);
 }
 
 function updateOutpaintFillWidget(node) {
@@ -178,8 +235,7 @@ function updateOutpaintFillWidget(node) {
         if (fit === "Outpaint" || fit === "Center Crop") showWidget(slideWidget);
         else hideWidget(slideWidget);
     }
-    node.setSize(node.computeSize());
-    node.setDirtyCanvas(true, true);
+    refreshNode(node);
 }
 
 // Postsampling — auto-detect advanced widgets only matter when the toggle is on.
@@ -200,8 +256,7 @@ function updateAutoDetectWidgets(node) {
         if (on) showWidget(widget);
         else hideWidget(widget);
     }
-    node.setSize(node.computeSize());
-    node.setDirtyCanvas(true, true);
+    refreshNode(node);
 }
 
 app.registerExtension({
@@ -213,6 +268,7 @@ app.registerExtension({
             nodeType.prototype.onNodeCreated = function () {
                 origOnCreated?.apply(this, arguments);
                 requestAnimationFrame(() => {
+                    setupPresamplingTriggers(this);
                     updateResolutionWidgets(this);
                     updateMaskWidgets(this);
                 });
@@ -225,6 +281,7 @@ app.registerExtension({
                 requestAnimationFrame(() => {
                     warnIfStalePresampling(this);
                     migrateLegacyMegapixels(this);
+                    setupPresamplingTriggers(this);
                     updateResolutionWidgets(this);
                 });
             };
@@ -256,13 +313,19 @@ app.registerExtension({
             const origOnCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 origOnCreated?.apply(this, arguments);
-                requestAnimationFrame(() => updateAutoDetectWidgets(this));
+                requestAnimationFrame(() => {
+                    setupPostsamplingTriggers(this);
+                    updateAutoDetectWidgets(this);
+                });
             };
 
             const origOnConfigure = nodeType.prototype.onConfigure;
             nodeType.prototype.onConfigure = function (info) {
                 origOnConfigure?.apply(this, arguments);
-                requestAnimationFrame(() => updateAutoDetectWidgets(this));
+                requestAnimationFrame(() => {
+                    setupPostsamplingTriggers(this);
+                    updateAutoDetectWidgets(this);
+                });
             };
 
             const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
