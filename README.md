@@ -14,6 +14,12 @@ https://github.com/user-attachments/assets/f84cc919-325d-465b-8d3d-e178de5f7872
 ## What's new in 1.10.x
 
 - **New node: 😺NKD Klein Prompt Builder** — build a prompt visually by combining your own text with curated presets (style, lighting, camera angle, composition, mood, and more) from dropdowns, with a **live preview** of the result. Switch between flowing prose (best for Klein) and a structured JSON template for automation. Wire its `prompt` output into Presampling's positive input. **The dropdown options are defined in `klein_presets.json`** — edit that file to add, remove or reword presets to your taste, then restart ComfyUI.
+- **New *(experimental)*: regional reference control** — send a specific reference image to a specific **area** of the canvas. Paint a mask for the zone and the reference's influence is confined there (and can be reinforced inside it), instead of the model spreading it across the whole image. A small family of nodes on the model line, between Presampling and your sampler:
+  - **😺NKD Klein Reference Region** — confines one reference to a masked zone, with controls for how strong it is inside, how firmly it's held back outside, and how crisp the edge is.
+  - **😺NKD Klein Reference Fit** — scales a reference to sit inside the masked area, so the *whole* reference lands in the zone instead of only the part that happens to overlap it.
+  - **😺NKD Klein Reference Control** — one node that does it all: overall strength + optional per-step curve + regional confinement (the mask is optional — without it, it's just a strength control). Chain one per reference.
+
+  Experimental: it works well in testing, but on strong settings expect a little bleed into neighbouring areas. Feedback welcome.
 
 ## What's new in 1.9.x
 
