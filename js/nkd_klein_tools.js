@@ -348,6 +348,20 @@ function setupPromptBuilder(node) {
     }
 }
 
+// NKDKleinReferenceControl — show the regional controls only when a mask is
+// connected (mask is optional → pure strength node without it).
+const CONTROL_REGIONAL_WIDGETS = ["region_weight", "outside_suppression", "region_hardness"];
+
+function updateControlWidgets(node) {
+    const on = isMaskConnected(node);
+    for (const name of CONTROL_REGIONAL_WIDGETS) {
+        const w = node.widgets?.find(x => x.name === name);
+        if (!w) continue;
+        if (on) showWidget(w); else hideWidget(w);
+    }
+    refreshNode(node);
+}
+
 app.registerExtension({
     name: "nkd.klein_tools",
 
@@ -451,6 +465,27 @@ app.registerExtension({
             nodeType.prototype.onWidgetChanged = function (name, value) {
                 origOnWidgetChanged?.apply(this, arguments);
                 nkdPbUpdatePreview(this);
+            };
+            return;
+        }
+
+        if (nodeData.name === "NKDKleinReferenceControl") {
+            const origOnCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                origOnCreated?.apply(this, arguments);
+                requestAnimationFrame(() => updateControlWidgets(this));
+            };
+
+            const origOnConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (info) {
+                origOnConfigure?.apply(this, arguments);
+                requestAnimationFrame(() => updateControlWidgets(this));
+            };
+
+            const origOnConnectionsChange = nodeType.prototype.onConnectionsChange;
+            nodeType.prototype.onConnectionsChange = function (type, index, connected, link_info) {
+                origOnConnectionsChange?.apply(this, arguments);
+                if (type === 1) updateControlWidgets(this);
             };
             return;
         }
