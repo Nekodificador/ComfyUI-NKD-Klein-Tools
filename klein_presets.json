@@ -1,0 +1,74 @@
+{
+  "medium": [
+    "professional photography",
+    "cinematic film still",
+    "oil painting",
+    "watercolor painting",
+    "3D render",
+    "detailed illustration",
+    "anime style",
+    "Japanese woodblock print"
+  ],
+  "style": [
+    "photorealistic",
+    "lifestyle editorial",
+    "classical realism",
+    "film noir",
+    "Studio Ghibli style",
+    "cyberpunk aesthetic",
+    "modern minimalist",
+    "vintage analog"
+  ],
+  "lighting": [
+    "soft golden-hour backlight",
+    "soft natural window light",
+    "three-point softbox lighting",
+    "moody neon rim light",
+    "warm candlelight",
+    "overcast diffused light",
+    "dramatic chiaroscuro",
+    "cool blue-hour ambiance",
+    "hard direct flash"
+  ],
+  "camera_angle": [
+    "eye-level view",
+    "low angle",
+    "high angle",
+    "bird's-eye view",
+    "over-the-shoulder shot",
+    "dutch angle"
+  ],
+  "lens_shot": [
+    "24mm wide-angle",
+    "35mm natural perspective",
+    "50mm standard",
+    "85mm portrait lens",
+    "120mm macro",
+    "extreme close-up",
+    "medium shot",
+    "wide establishing shot"
+  ],
+  "composition": [
+    "rule of thirds",
+    "centered hero composition",
+    "triangular arrangement",
+    "symmetrical composition",
+    "leading lines",
+    "generous negative space"
+  ],
+  "mood": [
+    "serene and peaceful",
+    "tense and dramatic",
+    "mysterious",
+    "clean and minimalist",
+    "warm and nostalgic",
+    "epic and grand"
+  ],
+  "color_grade": [
+    "Kodak Portra 400 color science",
+    "Fuji Velvia saturated tones",
+    "teal-and-orange grade",
+    "muted pastel palette",
+    "high-contrast black and white"
+  ]
+}

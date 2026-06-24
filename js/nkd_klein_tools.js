@@ -259,6 +259,95 @@ function updateAutoDetectWidgets(node) {
     refreshNode(node);
 }
 
+// ---------------------------------------------------------------------------
+// NKDKleinPromptBuilder — live preview of the assembled prompt.
+// Mirrors prompt_assembly.py exactly (combo value = the phrase itself, "—" =
+// skip), so the preview shows precisely what the node will output. Python stays
+// the source of truth for execution; this is display-only.
+// ---------------------------------------------------------------------------
+const NKD_PB_SKIP = "—";
+const NKD_PB_ORDER = [
+    "medium", "style", "lighting", "camera_angle",
+    "lens_shot", "composition", "mood", "color_grade",
+];
+const NKD_PB_WIDGETS = ["user_prompt", "format", ...NKD_PB_ORDER, "extra"];
+
+function nkdPbClean(v) {
+    const s = (v == null ? "" : String(v)).trim();
+    return s === NKD_PB_SKIP ? "" : s;
+}
+
+function nkdPbJson(subject, chosen, extra) {
+    const obj = {};
+    const description = [subject, extra].filter(Boolean).join(", ");
+    if (description) obj.subjects = [{ description }];
+    const style = {};
+    if (chosen.medium) style.medium = chosen.medium;
+    if (chosen.style) style.technique = chosen.style;
+    if (Object.keys(style).length) obj.style = style;
+    const technical = {};
+    const camera = [chosen.camera_angle, chosen.lens_shot].filter(Boolean).join(", ");
+    if (camera) technical.camera = camera;
+    if (chosen.lighting) technical.lighting = chosen.lighting;
+    if (chosen.composition) technical.composition = chosen.composition;
+    if (Object.keys(technical).length) obj.technical = technical;
+    if (chosen.mood) obj.scene = { mood: chosen.mood };
+    if (chosen.color_grade) obj.color_grade = chosen.color_grade;
+    if (!Object.keys(obj).length) return "";
+    return JSON.stringify(obj, null, 2);
+}
+
+function nkdPbAssemble(node) {
+    const get = (n) => nkdPbClean(node.widgets?.find(w => w.name === n)?.value);
+    const fmt = node.widgets?.find(w => w.name === "format")?.value || "natural";
+    const subject = get("user_prompt");
+    const extra = get("extra");
+    const chosen = {};
+    for (const c of NKD_PB_ORDER) chosen[c] = get(c);
+    if (fmt === "json") return nkdPbJson(subject, chosen, extra);
+    const parts = [];
+    if (subject) parts.push(subject);
+    for (const c of NKD_PB_ORDER) if (chosen[c]) parts.push(chosen[c]);
+    if (extra) parts.push(extra);
+    return parts.join(", ");
+}
+
+function nkdPbEnsurePreview(node) {
+    if (node._nkdPbEl) return node._nkdPbEl;
+    const el = document.createElement("div");
+    el.className = "nkd-pb-preview";
+    Object.assign(el.style, {
+        whiteSpace: "pre-wrap", wordBreak: "break-word",
+        fontFamily: "monospace", fontSize: "11px", lineHeight: "1.35",
+        color: "#c8d0e0", background: "#1a1c22",
+        border: "1px solid #3a3d46", borderRadius: "4px",
+        padding: "6px 8px", boxSizing: "border-box",
+        width: "100%", height: "100%", overflowY: "auto", margin: "0",
+    });
+    // getMin/Max/Height (not computeSize) is how v1 DOM widgets size — see nkd-node.
+    node.addDOMWidget("nkd_preview", "NKD_PROMPT_PREVIEW", el, {
+        serialize: false,
+        hideOnZoom: false,
+        getMinHeight: () => 70,
+        getMaxHeight: () => 300,
+        getHeight: () => 100,
+    });
+    node._nkdPbEl = el;
+    return el;
+}
+
+function nkdPbUpdatePreview(node) {
+    const el = nkdPbEnsurePreview(node);
+    const text = nkdPbAssemble(node);
+    el.textContent = text || "(empty — type a prompt or pick presets above)";
+}
+
+function setupPromptBuilder(node) {
+    for (const name of NKD_PB_WIDGETS) {
+        wrapWidgetCallback(node, name, nkdPbUpdatePreview);
+    }
+}
+
 app.registerExtension({
     name: "nkd.klein_tools",
 
@@ -332,6 +421,36 @@ app.registerExtension({
             nodeType.prototype.onWidgetChanged = function (name, value) {
                 origOnWidgetChanged?.apply(this, arguments);
                 if (name === "auto_detect_edit_region") updateAutoDetectWidgets(this);
+            };
+            return;
+        }
+
+        if (nodeData.name === "NKDKleinPromptBuilder") {
+            const origOnCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                origOnCreated?.apply(this, arguments);
+                requestAnimationFrame(() => {
+                    nkdPbEnsurePreview(this);
+                    setupPromptBuilder(this);
+                    nkdPbUpdatePreview(this);
+                    this.setSize(this.computeSize());
+                    this.setDirtyCanvas(true, true);
+                });
+            };
+
+            const origOnConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (info) {
+                origOnConfigure?.apply(this, arguments);
+                requestAnimationFrame(() => {
+                    setupPromptBuilder(this);
+                    nkdPbUpdatePreview(this);
+                });
+            };
+
+            const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
+            nodeType.prototype.onWidgetChanged = function (name, value) {
+                origOnWidgetChanged?.apply(this, arguments);
+                nkdPbUpdatePreview(this);
             };
             return;
         }

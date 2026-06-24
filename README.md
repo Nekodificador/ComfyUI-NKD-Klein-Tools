@@ -11,6 +11,10 @@ https://github.com/user-attachments/assets/f84cc919-325d-465b-8d3d-e178de5f7872
 
 ---
 
+## What's new in 1.10.x
+
+- **New node: 😺NKD Klein Prompt Builder** — build a prompt visually by combining your own text with curated presets (style, lighting, camera angle, composition, mood, and more) from dropdowns, with a **live preview** of the result. Switch between flowing prose (best for Klein) and a structured JSON template for automation. Wire its `prompt` output into Presampling's positive input. **The dropdown options are defined in `klein_presets.json`** — edit that file to add, remove or reword presets to your taste, then restart ComfyUI.
+
 ## What's new in 1.9.x
 
 - **New node: 😺NKD Klein Reference Weight** — when you use more than one reference image, this lets you decide **how much each one shows up** in the result, one at a time. Turn a reference up so it asserts itself, or down so it stops dominating. `1.0` leaves it as usual, lower fades it out (`0` = ignored), higher makes it stronger. You can also connect a curve so a reference is strong at the start and eases off later (handy when you want it to set the mood without taking over the whole image). Optional — only add it when you want that extra control.
@@ -71,6 +75,10 @@ The end point. It takes the sampler's output and delivers the final image, putti
 ### 😺NKD Klein Reference Weight *(optional)*
 
 Sits between Presampling and your sampler. Lets you dial how much a single reference image shows up in the result, one reference at a time. Skip it if you don't need that control. See [Reference Weight](#reference-weight--per-reference-influence) below.
+
+### 😺NKD Klein Prompt Builder *(optional)*
+
+Assembles a prompt from your own text plus curated preset dropdowns, with a live preview, and outputs a string you connect to Presampling's positive input. Choose flowing prose (best for Klein) or a structured JSON template. The dropdown presets live in `klein_presets.json` — edit that file (then restart ComfyUI) to customise them.
 
 **The chain looks like this:**
 
