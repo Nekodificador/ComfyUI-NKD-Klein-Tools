@@ -1,5 +1,3 @@
-
-
 # NKD Klein Tools
 
 ComfyUI nodes that turn a Flux Klein workflow into something simple. Plug in your model, drop an image, write a prompt, and go — no manual wiring of internal pieces. Whether you want to generate from scratch, transform an existing photo, paint over a specific area, or zoom in for a high-detail touch-up, a couple of nodes handle it all. There's also an optional node to control how much each reference image shows up in the result.
@@ -20,6 +18,8 @@ https://github.com/user-attachments/assets/f84cc919-325d-465b-8d3d-e178de5f7872
   - **😺NKD Klein Reference Control** — one node that does it all: overall strength + optional per-step curve + regional confinement (the mask is optional — without it, it's just a strength control). Chain one per reference.
 
   Experimental: it works well in testing, but on strong settings expect a little bleed into neighbouring areas. Feedback welcome.
+
+https://github.com/user-attachments/assets/a62cd1a4-6c2c-4ee4-89c8-e515857a4835
 
 ## What's new in 1.9.x
 
