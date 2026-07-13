@@ -19,7 +19,6 @@ def _probe(module_name: str) -> bool:
 
 
 _HAS_CV2 = _probe("cv2")
-_HAS_KORNIA = _probe("kornia")
 
 
 # ---------------------------------------------------------------------------
@@ -187,31 +186,34 @@ def _resize_mask(mask: torch.Tensor, width: int, height: int) -> torch.Tensor:
 def _mask_grow(mask: torch.Tensor, expand: int, blur: int) -> torch.Tensor:
     if mask.dim() == 2:
         mask = mask.unsqueeze(0)
+    if expand <= 0 and blur <= 0:
+        return mask.float()
 
-    m = mask.unsqueeze(1).float()
+    # ComfyUI hands masks over on CPU; morphology + separable blur at native
+    # resolution there takes seconds on large images. Hop to the GPU for the
+    # heavy passes and return on the original device.
+    orig_device = mask.device
+    work_device = orig_device
+    if orig_device.type == "cpu" and torch.cuda.is_available():
+        work_device = torch.device("cuda")
+
+    m = mask.to(work_device).unsqueeze(1).float()
 
     if expand > 0:
-        try:
-            import kornia.morphology as morph
-            # 3×3 dilation kernel iterated expand times — GPU-accelerated via kornia.
-            # Processes the full batch at once, O(n * expand) but highly optimised.
-            kernel = torch.ones(3, 3, device=mask.device, dtype=m.dtype)
-            for _ in range(expand):
-                m = morph.dilation(m, kernel)
-        except ImportError:
-            # Fallback: chunked max-pool — still much faster than a single huge conv kernel
-            remaining = expand
-            for k in (32, 8, 2, 1):
-                while remaining >= k:
-                    m = F.pad(m, (k, k, k, k), mode="replicate")
-                    m = F.max_pool2d(m, kernel_size=2 * k + 1, stride=1, padding=0)
-                    remaining -= k
+        # Chunked max-pool dilation: ~log(expand) passes instead of `expand`
+        # iterations of a 3×3 kernel. Square structuring element either way.
+        remaining = expand
+        for k in (32, 8, 2, 1):
+            while remaining >= k:
+                m = F.pad(m, (k, k, k, k), mode="replicate")
+                m = F.max_pool2d(m, kernel_size=2 * k + 1, stride=1, padding=0)
+                remaining -= k
         m = m.clamp(0.0, 1.0)
 
     if blur > 0:
         k = blur | 1
         pad = k // 2
-        box = torch.ones(1, 1, 1, k, device=mask.device, dtype=m.dtype) / k
+        box = torch.ones(1, 1, 1, k, device=m.device, dtype=m.dtype) / k
         for _ in range(3):
             m = F.pad(m, (pad, pad, 0, 0), mode="replicate")
             m = F.conv2d(m, box, padding=0)
@@ -221,7 +223,7 @@ def _mask_grow(mask: torch.Tensor, expand: int, blur: int) -> torch.Tensor:
             m = F.conv2d(m, box_v, padding=0)
         m = m.clamp(0.0, 1.0)
 
-    return m.squeeze(1)
+    return m.squeeze(1).to(orig_device)
 
 
 # ---------------------------------------------------------------------------
@@ -511,19 +513,18 @@ def _grow_bbox_to_aspect(
     new_w = min(new_w, max_w)
     new_h = min(new_h, max_h)
 
-    # Re-centre on the original bbox centre, then clamp to image bounds.
-    cx = (x1 + x2) // 2
-    cy = (y1 + y2) // 2
-    nx1 = (cx - new_w // 2) // multiple * multiple
-    ny1 = (cy - new_h // 2) // multiple * multiple
-    if nx1 < 0:
-        nx1 = 0
-    if ny1 < 0:
-        ny1 = 0
-    if nx1 + new_w > img_w:
-        nx1 = max(0, (img_w - new_w) // multiple * multiple)
-    if ny1 + new_h > img_h:
-        ny1 = max(0, (img_h - new_h) // multiple * multiple)
+    # Placement: only the SIZE needs grid alignment (the VAE cares about the
+    # crop dimensions, not its offset). Free offsets let the box hug the image
+    # edges exactly on non-aligned image sizes, and containment comes first:
+    # cover the original bbox, centre the leftover, clamp to bounds.
+    def _place(a1: int, a2: int, size: int, limit: int) -> int:
+        p = (a1 + a2) // 2 - size // 2
+        p = min(p, a1)          # cover the bbox start
+        p = max(p, a2 - size)   # cover the bbox end (wins when size < bbox)
+        return max(0, min(p, limit - size))
+
+    nx1 = _place(x1, x2, new_w, img_w)
+    ny1 = _place(y1, y2, new_h, img_h)
     return nx1, ny1, nx1 + new_w, ny1 + new_h
 
 
