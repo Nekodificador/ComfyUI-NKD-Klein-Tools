@@ -802,20 +802,25 @@ def _lab_to_rgb(lab):
 # ---- Reinhard color match (background-only statistics) -----------------------
 
 def _reinhard_match(orig_rgb, gen_rgb, composite_mask, valid_mask, strength):
-    """Match gen's color statistics to orig using only background pixels.
-    Returns gen unchanged when the background is too small to be reliable —
-    matching on the edit region itself would just propagate the shift."""
+    """Pull the edited region's colour statistics toward the original's, over the
+    EDITED (masked) region — that's where the model's drift lives. Measuring the
+    background instead is a no-op whenever gen equals orig outside the mask (the
+    masked-sampling / composite case), so match the foreground. Returns gen
+    unchanged when the edit region is too small to estimate statistics reliably.
+
+    Caveat: for a region the model deliberately rewrote (auto-detect Case 4), the
+    original content is a weaker colour reference — dial back with the strength."""
     if strength <= 0.0:
         return gen_rgb
-    bg = (composite_mask < 0.05) & (valid_mask > 0.5)
-    if bg.sum() < 100:
+    fg = (composite_mask > 0.5) & (valid_mask > 0.5)
+    if fg.sum() < 100:
         return gen_rgb
     orig_lab = _rgb_to_lab(orig_rgb)
     gen_lab = _rgb_to_lab(gen_rgb)
-    o_mean = orig_lab[bg].mean(axis=0)
-    o_std = orig_lab[bg].std(axis=0) + 1e-5
-    g_mean = gen_lab[bg].mean(axis=0)
-    g_std = gen_lab[bg].std(axis=0) + 1e-5
+    o_mean = orig_lab[fg].mean(axis=0)
+    o_std = orig_lab[fg].std(axis=0) + 1e-5
+    g_mean = gen_lab[fg].mean(axis=0)
+    g_std = gen_lab[fg].std(axis=0) + 1e-5
     matched = (gen_lab - g_mean) / g_std * o_std + o_mean
     matched_rgb = _lab_to_rgb(matched)
     blended = matched_rgb * strength + gen_rgb * (1.0 - strength)
