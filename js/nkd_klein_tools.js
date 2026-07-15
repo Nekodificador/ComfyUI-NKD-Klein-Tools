@@ -1,5 +1,41 @@
 import { app } from "../../scripts/app.js";
 
+// Classic (LiteGraph) DOM widgets mis-size laterally on selection / DOM
+// interaction — ballooning to canvas width or collapsing — while node.size[0]
+// stays correct. Clamp the container back to the node width. WIDTH only.
+function keepDomWidgetSized(node, container) {
+  const MAX_MARGIN = 40;
+  let enforcingW = false;
+  let goodMargin = 15;
+  const vueMode = () => !!(window.LiteGraph && window.LiteGraph.vueNodesMode);
+  const clamp = () => {
+    if (enforcingW) return;
+    if (vueMode()) { if (container.style.width) container.style.width = ""; return; }
+    const nodeW = node.size && node.size[0]; if (!nodeW) return;
+    const host = container.parentElement;
+    const hostW = host ? host.clientWidth : 0;
+    const broken = hostW > 0 && (hostW > nodeW * 1.2 || hostW < nodeW * 0.7);
+    if (!broken) {
+      if (container.style.width) { enforcingW = true; container.style.width = ""; requestAnimationFrame(() => { enforcingW = false; }); }
+      const cw = container.clientWidth;
+      if (cw > 0 && cw <= nodeW && cw >= nodeW - MAX_MARGIN) goodMargin = nodeW - cw;
+      return;
+    }
+    const ref = Math.round(nodeW - goodMargin);
+    if (ref > 0 && Math.abs(container.clientWidth - ref) > 2) {
+      enforcingW = true; container.style.boxSizing = "border-box"; container.style.width = ref + "px";
+      requestAnimationFrame(() => { enforcingW = false; });
+    }
+  };
+  clamp();
+  const ro = new ResizeObserver(clamp);
+  ro.observe(container);
+  const origResize = node.onResize;
+  node.onResize = function () { if (origResize) origResize.apply(this, arguments); clamp(); };
+  const iv = setInterval(clamp, 250);
+  return () => { ro.disconnect(); clearInterval(iv); };
+}
+
 const LEGACY_MEGAPIXEL_MAP = {
     "1 MP": 1.0,
     "2 MP": 2.0,
@@ -333,6 +369,7 @@ function nkdPbEnsurePreview(node) {
         getHeight: () => 100,
     });
     node._nkdPbEl = el;
+    node._nkdW = keepDomWidgetSized(node, el);
     return el;
 }
 
@@ -465,6 +502,12 @@ app.registerExtension({
             nodeType.prototype.onWidgetChanged = function (name, value) {
                 origOnWidgetChanged?.apply(this, arguments);
                 nkdPbUpdatePreview(this);
+            };
+
+            const origOnRemoved = nodeType.prototype.onRemoved;
+            nodeType.prototype.onRemoved = function () {
+                this._nkdW?.();  // stop the width clamp's observer + poll
+                origOnRemoved?.apply(this, arguments);
             };
             return;
         }
