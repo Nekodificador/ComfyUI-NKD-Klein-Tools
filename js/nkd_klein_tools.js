@@ -279,6 +279,7 @@ const AUTO_DETECT_DEPENDENT_WIDGETS = [
     "edge_softness",
     "region_padding",
     "fill_inner_gaps",
+    "remove_specks",
     "extend_to_borders",
 ];
 

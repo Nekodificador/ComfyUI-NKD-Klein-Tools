@@ -669,6 +669,18 @@ class NKDKleinPostsampling(io.ComfyNode):
                     ),
                     display_name="Fill Inner Gaps"),
 
+                io.Float.Input("remove_specks", default=0.1, min=0.0, max=5.0, step=0.05,
+                    tooltip=(
+                        "Cleans up the little floating scraps the detection leaves "
+                        "scattered around the image — grain and noise that changed "
+                        "just enough to be flagged. Any detected patch smaller than "
+                        "this percentage of the image area gets dropped. Raise it if "
+                        "specks still get through, lower it if a genuinely small edit "
+                        "(an earring, a button) is being erased. 0 turns it off. "
+                        "Only used when Auto-Detect Edit Region is on."
+                    ),
+                    display_name="Remove Specks"),
+
                 io.Boolean.Input("extend_to_borders", default=True,
                     tooltip=(
                         "Extrapolates the auto-detected region into any border void "
@@ -679,6 +691,17 @@ class NKDKleinPostsampling(io.ComfyNode):
                         "Edit Region is on."
                     ),
                     display_name="Extend To Borders"),
+
+                io.Boolean.Input("transparent_background", default=False,
+                    tooltip=(
+                        "Outputs the image with an alpha channel: only the "
+                        "regenerated area stays opaque and everything else "
+                        "becomes transparent — ready to save as a PNG cutout or "
+                        "composite elsewhere. Needs a mask (or Auto-Detect Edit "
+                        "Region) to know what the edited area is; without one the "
+                        "image comes out normal."
+                    ),
+                    display_name="Transparent Background"),
             ],
             outputs=[
                 io.Image.Output("image"),
@@ -704,7 +727,9 @@ class NKDKleinPostsampling(io.ComfyNode):
         edge_softness: float = 2.0,
         region_padding: float = 0.0,
         fill_inner_gaps: bool = False,
+        remove_specks: float = 0.1,
         extend_to_borders: bool = True,
+        transparent_background: bool = False,
     ) -> io.NodeOutput:
 
         # Warn (don't crash) when a requested feature needs OpenCV but it isn't
@@ -737,6 +762,10 @@ class NKDKleinPostsampling(io.ComfyNode):
                     bundle.crop_background, composite, match_original_colors, seamless_edges,
                 )
             debug = _difference_debug(composite, bundle.crop_background)
+            if transparent_background:
+                composite = _with_alpha(composite, bundle.processed_mask_native
+                                        if bundle.processed_mask_native is not None
+                                        else bundle.processed_mask)
             return io.NodeOutput(composite, debug)
 
         # Case 2: inpainting without detailing → composite sampled over original
@@ -758,6 +787,8 @@ class NKDKleinPostsampling(io.ComfyNode):
                     orig, composite, match_original_colors, seamless_edges, mask=mask_2d,
                 )
             debug = _difference_debug(composite, orig)
+            if transparent_background:
+                composite = _with_alpha(composite, bundle.processed_mask)
             return io.NodeOutput(composite, debug)
 
         # Case 4: img2img with auto-detect → find changed region, blend gen back over original.
@@ -773,13 +804,30 @@ class NKDKleinPostsampling(io.ComfyNode):
                 region_padding, edge_softness,
                 fill_inner_gaps, extend_to_borders,
                 match_original_colors, seamless_edges,
+                remove_specks,
             )
             debug = _mask_overlay_debug(orig, sharp_mask)
+            if transparent_background:
+                composite = _with_alpha(
+                    composite, torch.from_numpy(sharp_mask).unsqueeze(0))
             return io.NodeOutput(composite, debug)
 
         # Case 3: t2i / img2img passthrough (no original to diff against, or auto-detect off)
         debug = torch.zeros_like(image)
         return io.NodeOutput(image, debug)
+
+
+def _with_alpha(image: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
+    """RGB → RGBA using `mask` as the alpha (1 = keep). Same result as wiring the
+    image and the mask into Join Image with Alpha, minus the extra nodes.
+    No mask → nothing to cut out, so the image comes back untouched."""
+    if mask is None:
+        return image
+    alpha = _resize_mask(mask, image.shape[2], image.shape[1])
+    alpha = alpha.to(device=image.device, dtype=image.dtype).clamp(0.0, 1.0)
+    if alpha.shape[0] != image.shape[0]:
+        alpha = alpha[:1].expand(image.shape[0], -1, -1)
+    return torch.cat([image[..., :3], alpha.unsqueeze(-1)], dim=-1)
 
 
 def _difference_debug(composite: torch.Tensor, original: torch.Tensor, gain: float = 4.0) -> torch.Tensor:
@@ -821,7 +869,8 @@ def _apply_post_blend(orig: torch.Tensor, composite: torch.Tensor,
 def _run_auto_detect(orig: torch.Tensor, sampled: torch.Tensor,
                      region_padding: float, edge_softness: float,
                      fill_inner_gaps: bool, extend_to_borders: bool,
-                     match_strength: float, seamless: bool):
+                     match_strength: float, seamless: bool,
+                     remove_specks: float = 0.0):
     """Bridge tensor↔numpy for the auto-detect composite. Returns (composite_tensor,
     sharp_mask_np) — the sharp mask is forwarded to the debug overlay so the user
     can see what was detected."""
@@ -835,6 +884,7 @@ def _run_auto_detect(orig: torch.Tensor, sampled: torch.Tensor,
         extend_to_borders=extend_to_borders,
         color_match_strength=match_strength,
         seamless=seamless,
+        speck_pct=remove_specks,
     )
     return _np_to_tensor(result_np, sampled.device, sampled.dtype), sharp_np
 

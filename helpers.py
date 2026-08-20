@@ -978,6 +978,29 @@ def _mask_fill_holes(mask):
     return out.astype(np.float32)
 
 
+def _mask_drop_specks(mask, min_area_px: int):
+    """Drop connected components smaller than min_area_px. Detection picks up
+    grain, compression noise and JPEG-ish speckle all over the background —
+    those come out as a scatter of tiny islands far from the real edit."""
+    import cv2
+    if min_area_px <= 0:
+        return mask.astype(np.float32)
+    binary = (mask > 0.5).astype(np.uint8)
+    n, labeled, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if n <= 1:
+        return mask.astype(np.float32)
+    keep = np.zeros_like(binary)
+    for idx in range(1, n):
+        if stats[idx, cv2.CC_STAT_AREA] >= min_area_px:
+            keep |= (labeled == idx).astype(np.uint8)
+    # Everything was speckle: keep the biggest island rather than wiping the
+    # mask (an empty mask would composite nothing at all).
+    if keep.max() == 0:
+        biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        keep = (labeled == biggest).astype(np.uint8)
+    return keep.astype(np.float32)
+
+
 def _mask_bleed_to_invalid(mask, valid):
     """Extend the mask into the SIFT void border (pixels with no source data)
     so the original doesn't peek through as a thin frame."""
@@ -1061,7 +1084,8 @@ def _composite_with_options(orig_rgb, gen_rgb, mask_float, valid_mask,
 def _auto_detect_composite(orig_rgb, gen_rgb,
                            grow_pct: float, feather_pct: float,
                            fill_holes: bool, extend_to_borders: bool,
-                           color_match_strength: float, seamless: bool):
+                           color_match_strength: float, seamless: bool,
+                           speck_pct: float = 0.0):
     """Detect the edited region between orig and gen, then composite gen back
     onto orig only there. Returns (result_rgb, composite_mask, sharp_mask).
     The sharp mask is the pre-feather binary detection — useful for the debug
@@ -1128,7 +1152,11 @@ def _auto_detect_composite(orig_rgb, gen_rgb,
     local_2 = _local_threshold(diff_2, valid_2, diag)
     sharp = (diff_2 > np.minimum(de_thresh, local_2)).astype(np.float32) * valid_2
 
-    # Cleanup (order matters: dilate/erode → fill holes → close → bleed → feather).
+    # Cleanup (order matters: drop specks → dilate/erode → fill holes → bleed →
+    # feather). Specks go FIRST: growing them would push them over any area
+    # threshold and freeze the noise into the composite.
+    if speck_pct > 0:
+        sharp = _mask_drop_specks(sharp, int(round(h * w * speck_pct / 100.0)))
     if grow_px != 0:
         sharp = _mask_grow_px(sharp, grow_px) * valid_2
     if fill_holes:
