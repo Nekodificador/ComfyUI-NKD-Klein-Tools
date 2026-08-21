@@ -36,8 +36,14 @@ The node figures out which mode you're using based on what you connect — no se
 
 **The chain looks like this:**
 
-```
-NKD Klein Presampling → (NKD Klein Reference Control ×N) → [your sampler chain] → NKD Klein Postsampling
+```mermaid
+flowchart LR
+    PRE["**NKD Klein**<br/>**Presampling**"]:::nkd --> RC["**NKD Klein**<br/>**Reference Control** ×N"]:::nkd
+    RC --> SAMP(["your sampler chain"]):::external
+    SAMP --> POST["**NKD Klein**<br/>**Postsampling**"]:::nkd
+
+    classDef nkd fill:#3b3b6b,stroke:#8ab4ff,stroke-width:2px,color:#fff
+    classDef external fill:#2d2d2d,stroke:#888,color:#eee
 ```
 
 ---
