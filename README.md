@@ -33,7 +33,6 @@ The node figures out which mode you're using based on what you connect — no se
 | [😺NKD Klein Reference Region](docs/nodes.md#nkd-klein-reference-region) | The regional half on its own, for when a Reference Weight node is already in the chain. *optional, experimental* |
 | [😺NKD Klein Reference Fit](docs/nodes.md#nkd-klein-reference-fit) | Scales a reference so it sits inside the masked zone instead of stretching across the whole canvas. *optional, experimental* |
 | [😺NKD Klein Prompt Builder](docs/nodes.md#nkd-klein-prompt-builder) | Builds a prompt from your own text plus curated preset dropdowns, with a live preview. *optional* |
-| [😺NKD Klein Box Editor](docs/nodes.md#nkd-klein-box-editor-optional-klein-3) | Draw the boxes on your images instead of typing them (Klein 3). *optional* |
 | [😺NKD Klein Box Prompt](docs/nodes.md#nkd-klein-box-prompt-optional-klein-3) | Places, moves or removes things by bounding box (Klein 3). *optional* |
 
 **The chain looks like this:**

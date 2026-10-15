@@ -8,10 +8,9 @@ ComfyUI-free `prompt_assembly` module so it can be unit-tested and mirrored by
 the live-preview JS.
 """
 from __future__ import annotations
-import json
 from comfy_api.latest import io
 
-from .box_prompt import build_box_prompt, build_from_state, rows_from_state, rows_to_lines
+from .box_prompt import build_box_prompt
 from .prompt_assembly import SKIP, assemble_prompt, load_presets, options_for
 
 _PRESETS = load_presets()
@@ -142,7 +141,8 @@ class NKDKleinBoxPrompt(io.ComfyNode):
                     tooltip=(
                         "A full scene caption. Tag each element with <id> in the "
                         "text. For edits, refer to references as <ref_image_0>, "
-                        "<ref_image_1>…"
+                        "<ref_image_1>… counting from 0, the same number as "
+                        "'from N' below."
                     )),
                 io.String.Input(
                     "elements", multiline=True, default="", display_name="Elements",
@@ -162,54 +162,3 @@ class NKDKleinBoxPrompt(io.ComfyNode):
     @classmethod
     def execute(cls, caption: str = "", elements: str = "") -> io.NodeOutput:
         return io.NodeOutput(build_box_prompt(caption, elements))
-
-
-class NKDKleinBoxEditor(io.ComfyNode):
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="NKDKleinBoxEditor",
-            display_name="😺NKD Klein Box Editor",
-            category="😺NKD Nodes/Klein",
-            description=(
-                "FLUX.3 Klein only — draw the boxes instead of typing them. Open the "
-                "editor, drag on the image to add an element, give it a description, "
-                "and choose whether it is new, kept, moved or removed. Connect the "
-                "images you edit (ref_0, ref_1…) to see them under your boxes. Wire "
-                "`prompt` into Presampling's positive input (or `elements` into its "
-                "Bounding Boxes box)."
-            ),
-            inputs=[
-                io.String.Input(
-                    "caption", multiline=True, default="", display_name="Caption",
-                    tooltip=(
-                        "A full scene caption. Tag each element with <id> in the "
-                        "text, and refer to references as <ref_image_0>, <ref_image_1>…"
-                    )),
-                io.Autogrow.Input(
-                    "ref_images",
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("img", optional=True,
-                            tooltip="An image you edit. Optional: it is only shown under the boxes."),
-                        prefix="ref_", min=1, max=8),
-                    tooltip="Connect the same images you give Presampling (ref_0 first)."),
-                io.Int.Input("width", default=1024, min=64, max=16384, step=16,
-                    tooltip="Canvas shape when no image is connected (only the ratio matters)."),
-                io.Int.Input("height", default=1024, min=64, max=16384, step=16,
-                    tooltip="Canvas shape when no image is connected (only the ratio matters)."),
-                io.String.Input(
-                    "boxes_json", default="", multiline=False, socketless=True,
-                    tooltip="Boxes drawn in the editor (managed by the widget)"),
-            ],
-            outputs=[
-                io.String.Output(display_name="prompt"),
-                io.String.Output(display_name="elements"),
-            ],
-        )
-
-    @classmethod
-    def execute(cls, caption: str = "", ref_images=None, width: int = 1024,
-                height: int = 1024, boxes_json: str = "") -> io.NodeOutput:
-        state = json.loads(boxes_json) if (boxes_json or "").strip() else {}
-        return io.NodeOutput(build_from_state(caption, state),
-                             rows_to_lines(rows_from_state(state)))

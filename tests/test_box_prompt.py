@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from box_prompt import (  # noqa: E402
-    build_box_prompt, build_from_state, parse_rows, rows_from_state, rows_to_lines,
+    build_box_prompt, build_from_state, crop_rows, parse_rows, rows_from_state, rows_to_lines,
 )
 
 
@@ -122,6 +122,54 @@ def _raises_state(state):
     except ValueError as e:
         return str(e)
     raise AssertionError("expected ValueError")
+
+
+def _rows(*els):
+    return rows_from_state({"elements": list(els)})
+
+
+def test_crop_maps_boxes_into_the_zoomed_area():
+    # 1000x1000 image, detailing crop is its top-left quarter (0..500 on both axes).
+    rows = _rows(_el(id="a_1", tgt=[0, 0, 250, 250]),
+                 _el(id="b_1", kind="move", ref=1, src=[100, 100, 400, 400], tgt=[100, 100, 400, 400]))
+    out, dropped = crop_rows(rows, 1000, 1000, (0, 0, 500, 500))
+    assert dropped == []
+    assert out[0]["tgt"] == [0, 0, 500, 500]                 # 250 of 500 px -> half the crop
+    assert out[1]["tgt"] == [200, 200, 800, 800]             # canvas box remapped
+    assert out[1]["src"] == [100, 100, 400, 400]             # ref_1 is its own image: untouched
+
+
+def test_crop_remaps_ref_0_source_and_clips_partial_boxes():
+    rows = _rows(_el(id="k_1", kind="keep", ref=0, src=[400, 400, 900, 900]),
+                 _el(id="r_1", kind="remove", ref=0, src=[100, 100, 300, 300]))
+    out, dropped = crop_rows(rows, 1000, 1000, (0, 0, 500, 500))
+    assert dropped == []
+    assert out[0]["src"] == out[0]["tgt"] == [800, 800, 1000, 1000]   # clipped at the crop edge
+    assert out[1]["src"] == [200, 200, 600, 600]
+
+
+def test_crop_drops_elements_outside_and_reports_them():
+    rows = _rows(_el(id="in_1", tgt=[100, 100, 200, 200]),
+                 _el(id="out_1", tgt=[700, 700, 900, 900]),
+                 _el(id="gone_1", kind="remove", ref=0, src=[800, 800, 900, 900]))
+    out, dropped = crop_rows(rows, 1000, 1000, (0, 0, 500, 500))
+    assert [r["id"] for r in out] == ["in_1"]
+    assert dropped == ["out_1", "gone_1"]
+
+
+def test_crop_with_non_square_image_and_offset():
+    # 2000x1000 image; crop x 1000..2000, y 0..500 (right-top quarter).
+    rows = _rows(_el(id="a_1", tgt=[0, 500, 500, 1000]))      # right half of the whole image
+    out, _ = crop_rows(rows, 2000, 1000, (1000, 0, 2000, 500))
+    assert out[0]["tgt"] == [0, 0, 1000, 1000]                # exactly the crop
+
+
+def test_build_from_state_applies_the_crop():
+    state = {"elements": [_el(id="a_1", tgt=[0, 0, 250, 250])]}
+    prompt = build_from_state("C.", state, crop=(1000, 1000, (0, 0, 500, 500)))
+    assert _json_of(prompt)[0]["bbox"] == [0, 0, 500, 500]
+    assert build_from_state("C.", {"elements": [_el(id="o_1", tgt=[800, 800, 900, 900])]},
+                            crop=(1000, 1000, (0, 0, 500, 500))) == "C."      # everything dropped
 
 
 if __name__ == "__main__":

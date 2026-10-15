@@ -164,8 +164,51 @@ def rows_to_lines(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_from_state(caption: str, state) -> str:
-    """caption + element list from the visual editor's state (dict, JSON string or empty)."""
+def crop_rows(rows: list[dict], native_w: int, native_h: int, crop_box) -> tuple[list[dict], list[str]]:
+    """Map the boxes into the zoomed area Presampling's detailing mode works on.
+
+    Boxes are drawn on the whole image; with detailing the model only sees `crop_box`
+    ((x1, y1, x2, y2) in ref_0's pixels), so every box that belongs to the canvas
+    (`tgt`) and every box on ref_0 (`src` of ref 0) is re-expressed relative to that
+    crop and clipped to it. Boxes on other references are their own images: untouched.
+    Elements left with nothing inside the crop are dropped; returns (rows, dropped ids)."""
+    x1, y1, x2, y2 = crop_box
+    cw, ch = max(1, x2 - x1), max(1, y2 - y1)
+
+    def remap(b):
+        t, l, bo, r = b
+        nt = (t / 1000 * native_h - y1) / ch * 1000
+        nb = (bo / 1000 * native_h - y1) / ch * 1000
+        nl = (l / 1000 * native_w - x1) / cw * 1000
+        nr = (r / 1000 * native_w - x1) / cw * 1000
+        nt, nb, nl, nr = (min(1000, max(0, round(v))) for v in (nt, nb, nl, nr))
+        return None if nb - nt < 1 or nr - nl < 1 else [nt, nl, nb, nr]
+
+    out, dropped = [], []
+    for r in rows:
+        r = dict(r)
+        lost = False
+        if r["tgt"] is not None:
+            r["tgt"] = remap(r["tgt"])
+            lost = r["tgt"] is None
+        if r["src"] is not None and r["ref"] == 0:
+            r["src"] = remap(r["src"])
+            lost = lost or r["src"] is None
+        (dropped if lost else out).append(r["id"] if lost else r)
+    return out, dropped
+
+
+def build_from_state(caption: str, state, crop=None, dropped=None) -> str:
+    """caption + element list from the visual editor's state (dict, JSON string or empty).
+
+    `crop` = (native_w, native_h, crop_box) maps the boxes into Presampling's detailing
+    area first (see crop_rows); ids dropped because they fall outside it are appended to
+    the `dropped` list when one is given."""
     if isinstance(state, str):
         state = json.loads(state) if state.strip() else {}
-    return _emit(caption, rows_from_state(state))
+    rows = rows_from_state(state)
+    if crop is not None:
+        rows, gone = crop_rows(rows, crop[0], crop[1], crop[2])
+        if dropped is not None:
+            dropped.extend(gone)
+    return _emit(caption, rows)

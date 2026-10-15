@@ -22,6 +22,7 @@ from typing import Optional
 
 import torch
 
+from .helpers import _flux3_kv_scale
 from .ref_schedule import _effective_scale
 
 _log = logging.getLogger(__name__)
@@ -29,10 +30,6 @@ _log = logging.getLogger(__name__)
 _RULES = "nkd_klein_rules"
 _LAYOUT = "nkd_flux3_layout"
 _WRAP_KEY = "nkd_flux3_layout"
-# Boosting k/v is far touchier on Flux3 than on Flux2 (x1.5 weight already
-# over-saturates), so only a quarter of the Flux2 boost is applied; dilution (<1)
-# keeps the full Flux2 mapping.
-_BOOST_GAIN = 0.25
 _CACHE: dict = {}      # region biases, outside the rules (model_options get deep-copied)
 
 
@@ -74,9 +71,7 @@ def apply_rules(q, k, v, mask, rules, layout, options):
         span = reference_span(layout, rule["ref"])
         if span is None:
             continue
-        scale = _effective_scale(rule.get("schedule"), rule.get("weight", 1.0), options)
-        if scale > 1.0:
-            scale = 1.0 + (scale - 1.0) * _BOOST_GAIN
+        scale = _effective_scale(rule.get("schedule"), rule.get("weight", 1.0), options, mapper=_flux3_kv_scale)
         if abs(scale - 1.0) > 1e-6:
             if not cloned:
                 k, v, cloned = k.clone(), v.clone(), True

@@ -9,6 +9,21 @@ Everything Presampling reads, and the mode it puts itself in.
 - **ref_0** — your input image. The most important slot.
 - **ref_1, ref_2, …** — extra reference images. Slots appear automatically when you connect one, up to 8.
 
+### Referring to your images in the prompt
+
+In the node and in the box editor your images are numbered **from 0** (`ref_0`, `ref_1`, …). In plain words, the first image is just "the first image". They always line up like this:
+
+| In the node and the box editor | In a plain prompt | In a box caption (Klein 3) |
+|---|---|---|
+| `ref_0` | the first image | `<ref_image_0>` |
+| `ref_1` | the second image | `<ref_image_1>` |
+| `ref_2` | the third image | `<ref_image_2>` |
+
+- **Plain prompts:** say *what* you want and *where it comes from*, using words: *"Place the red apple from the second image on the table in the first image."* Prefer "the first / second / third image" over "image 1": numbers work with two images, but "image 1" can mean the first or the second.
+- **Box captions (Klein 3):** tag each element with its `<id>` and refer to a reference as `<ref_image_N>`, counting from 0. N is the same number as *from ref N* on the element's card, which also shows the tags to type. The `<ref_image_N>` tags belong to box captions; in a prompt without boxes, use words.
+- **Name the object.** With two images the order alone is enough. With **three or more**, a number on its own ("the object from the second image") is not reliable; say what it is ("the red apple from the second image"). Klein 2 follows the numbers less reliably still, so naming matters even more there.
+- **One style per prompt.** Don't mix "the second image" with `<ref_image_1>`.
+
 ### Output size
 
 - **Resize** — on by default: the node chooses the output size from Aspect Ratio and Megapixels. Turn it off to keep every image at its own size and work at your input's native size (the node won't resize anything — handle sizing yourself elsewhere). With Resize off, Aspect Ratio and Megapixels are hidden since they no longer apply.

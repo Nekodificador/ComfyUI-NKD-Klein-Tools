@@ -1,4 +1,4 @@
-// NKD Klein Box Editor — draw FLUX.3 Klein bounding boxes (modal editor).
+// NKD Klein Box Editor — draw FLUX.3 Klein bounding boxes (modal editor), attached to Presampling.
 // Vanilla JS (this pack has no build step). State lives in the node's hidden `boxes_json`:
 //   { elements: [{ id, kind: "new"|"keep"|"move"|"remove", ref: int|null, desc,
 //                  src: [top,left,bottom,right]|null, tgt: [...]|null }] }
@@ -6,16 +6,15 @@
 // the reference it comes from (ref view), `tgt` on the output canvas (target view).
 // Python (box_prompt.py) turns the state into the prompt; nothing is computed here, so the
 // editor and the typed Box Prompt cannot drift apart.
-import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { openNkdModal, nkdButton, nkdSelect } from "./nkd_modal.js";
 
-const NODE_NAME = "NKDKleinBoxEditor";
+const HINT = "drag on empty space to add a box · drag a box to move · handles resize · Del removes";
 const MIN_SIZE = 8;      // smaller drags are treated as a click, not a box
 const HANDLE = 7;        // px
 
+// With a source reference chosen, what happens to the thing taken from it.
 const KINDS = [
-    { value: "new", label: "New — add here" },
     { value: "move", label: "Move" },
     { value: "keep", label: "Keep in place" },
     { value: "remove", label: "Remove" },
@@ -33,10 +32,10 @@ const complete = (el) => {
     return el.kind !== "move" || !!el.tgt;
 };
 
-function setup(node) {
+export function attachBoxEditor(node) {
     const widget = (name) => node.widgets?.find((w) => w.name === name);
     const cfg = widget("boxes_json");
-    if (!cfg) return;
+    if (!cfg) return null;
     cfg.type = "hidden";
     cfg.computeSize = () => [0, -4];
     cfg.hidden = true;
@@ -65,6 +64,11 @@ function setup(node) {
     const btn = node.addWidget("button", summary(), null, () => openEditor());
     btn.serialize = false;
     btn.options = { ...(btn.options || {}), serialize: false };
+    // Sit right under the prompt boxes instead of at the bottom of the node.
+    const at = node.widgets.indexOf(cfg);
+    node.widgets.splice(node.widgets.indexOf(btn), 1);
+    node.widgets.splice(at + 1, 0, btn);
+    node._nkdBoxBtn = btn;
     const refreshBtn = () => { btn.name = btn.label = summary(); node.setDirtyCanvas(true, true); };
 
     // ── Image behind the boxes: the upstream node's preview, best first ─────────────
@@ -93,6 +97,10 @@ function setup(node) {
         if (ready(up?.imgs?.[0])) return up.imgs[0];
         const file = widgetFile(up);
         if (ready(file)) return file;
+        // What Presampling actually received the last time it ran: exact, and it works for images
+        // generated upstream (they have no preview of their own until they run).
+        const ran = runRefs[ref];
+        if (ready(ran)) return ran;
         const seen = new Set([node.id]);                     // nearest ancestor with a preview
         let frontier = [up].filter(Boolean);
         for (let depth = 0; depth < 20 && frontier.length; depth++) {
@@ -111,6 +119,22 @@ function setup(node) {
     }
 
     let editor = null;
+    // References from the node's last run (`nkd_box_refs`), keyed by reference number.
+    const runRefs = {};
+    const origExecuted = node.onExecuted;
+    node.onExecuted = function (out) {
+        origExecuted?.apply(this, arguments);
+        const list = out?.nkd_box_refs;
+        if (!Array.isArray(list)) return;
+        for (const k of Object.keys(runRefs)) delete runRefs[k];
+        for (const it of list) {
+            const im = new Image();
+            im.onload = () => editor?.redraw();
+            im.src = api.apiURL(`/view?filename=${encodeURIComponent(it.filename)}&type=${it.type}&subfolder=${encodeURIComponent(it.subfolder || "")}&t=${Date.now()}`);
+            runRefs[it.i] = im;
+        }
+        editor?.redraw();
+    };
     const origConfigure = node.onConfigure;
     node.onConfigure = function () { origConfigure?.apply(this, arguments); refreshBtn(); };
     const origRemoved = node.onRemoved;
@@ -125,7 +149,7 @@ function setup(node) {
 
         const modal = openNkdModal({
             title: "😺 Klein Box Editor",
-            hint: "drag on empty space to add a box · drag a box to move · handles resize · Del removes",
+            hint: HINT,
             onClose: () => { window.removeEventListener("keydown", onKey, true); resizeObs.disconnect(); editor = null; commit(); },
         });
         // Layout: stage (canvas + view tabs) | element panel.
@@ -176,12 +200,58 @@ function setup(node) {
         const ghostKey = (el) => (view === "target" && el.kind === "keep" && el.src ? "src" : null);
 
         // ── geometry ────────────────────────────────────────────────────────────────
-        const dims = () => {
-            const im = view === "target" ? refImage(0) : refImage(view);
-            if (ready(im)) return { im, a: im.naturalWidth / im.naturalHeight };
-            const w = widget("width")?.value || 1024, h = widget("height")?.value || 1024;
-            return { im: null, a: w / h };
+        // What each view shows, mirroring how Presampling builds the canvas: the shape comes
+        // from Aspect Ratio / Megapixels, and ref_0 is placed on it by Image Fit. With
+        // detailing (mask + Use Detailing) you draw on the whole image: the boxes are mapped
+        // into the zoomed area when the node runs.
+        const wv = (n) => widget(n)?.value;
+        const natural = (im) => im.naturalWidth / im.naturalHeight;
+        const detailing = () => wv("use_detailing") === true
+            && node.inputs?.find((i) => i.name === "mask")?.link != null;
+        const canvasAspect = () => {
+            const r0 = refImage(0), nat = ready(r0) ? natural(r0) : null;
+            const ar = wv("aspect_ratio"), cw = wv("custom_width") || 1024, ch = wv("custom_height") || 1024;
+            if (nat && (detailing() || wv("resize") === false)) return nat;
+            if (ar === "As Reference") return nat ?? cw / ch;
+            if (ar === "Custom") return cw / ch;
+            const m = /^(\d+):(\d+)/.exec(ar || "");
+            return m ? Number(m[1]) / Number(m[2]) : 1;
         };
+        const dims = () => {
+            if (view !== "target" && view !== 0) {
+                const im = refImage(view);
+                return { im, a: ready(im) ? natural(im) : 1, fit: "stretch" };
+            }
+            const A = canvasAspect(), r0 = refImage(0);
+            if (!ready(r0)) return { im: null, a: A, fit: "stretch" };
+            const n = natural(r0);
+            if (detailing() || wv("resize") === false) return { im: r0, a: n, fit: "stretch" };
+            if (Math.abs(n - A) / n <= 0.02) return { im: r0, a: A, fit: "stretch" };
+            const f = wv("image_fit");
+            if (f === "Center Crop") return { im: r0, a: A, fit: "crop" };
+            if (f === "Outpaint") return { im: r0, a: A, fit: "letterbox" };
+            // Native: the model rebuilds the canvas, ref_0 keeps its own shape.
+            return view === "target" ? { im: r0, a: A, fit: "contain" } : { im: r0, a: n, fit: "stretch" };
+        };
+        const FILLS = { Gray: "#808080", Black: "#000000", White: "#ffffff", Smart: "#808080" };
+        function drawFit(im, fit) {
+            const slide = wv("slide") ?? 0.5, iw = im.naturalWidth, ih = im.naturalHeight;
+            if (fit === "crop") {
+                const dst = R.w / R.h;
+                let sx = 0, sy = 0, sw = iw, sh = ih;
+                if (iw / ih > dst) { sw = Math.round(ih * dst); sx = (1 - slide) * (iw - sw); }
+                else { sh = Math.round(iw / dst); sy = slide * (ih - sh); }
+                ctx.drawImage(im, sx, sy, sw, sh, R.x, R.y, R.w, R.h);
+            } else if (fit === "letterbox" || fit === "contain") {
+                const sc = Math.min(R.w / iw, R.h / ih), w = iw * sc, h = ih * sc;
+                const sl = fit === "letterbox" ? slide : 0.5;
+                if (fit === "letterbox") { ctx.fillStyle = FILLS[wv("outpaint_fill")] || "#808080"; ctx.fillRect(R.x, R.y, R.w, R.h); }
+                ctx.drawImage(im, R.x + sl * (R.w - w), R.y + (1 - sl) * (R.h - h), w, h);
+            } else {
+                ctx.drawImage(im, R.x, R.y, R.w, R.h);
+            }
+        }
+        if (detailing()) modal.setHint(HINT + " · Detailing is on: draw on the whole image, the boxes are mapped into the zoomed area");
         let R = { x: 0, y: 0, w: 1, h: 1 }, dpr = 1;
         const layout = () => {
             dpr = window.devicePixelRatio || 1;
@@ -209,10 +279,10 @@ function setup(node) {
             layout();
             ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            const { im } = dims();
+            const { im, fit } = dims();
             ctx.fillStyle = "#14171d";
             ctx.fillRect(R.x, R.y, R.w, R.h);
-            if (im) { ctx.globalAlpha = view === "target" ? 0.7 : 1; ctx.drawImage(im, R.x, R.y, R.w, R.h); ctx.globalAlpha = 1; }
+            if (im) { ctx.globalAlpha = view === "target" ? (fit === "contain" ? 0.5 : 0.7) : 1; drawFit(im, fit); ctx.globalAlpha = 1; }
             else {
                 ctx.fillStyle = "rgba(255,255,255,0.28)"; ctx.font = "12px system-ui"; ctx.textAlign = "center";
                 ctx.fillText(view === "target" ? "Connect an image to ref_0 to see it here" : `Connect an image to ref_${view}`, R.x + R.w / 2, R.y + R.h / 2);
@@ -329,7 +399,7 @@ function setup(node) {
                 if (b - t >= MIN_SIZE && r - l >= MIN_SIZE) placeDrawn(drag.box);
             }
             drag = null;
-            commit(); renderList(); draw();
+            commit(); renderTabs(); renderList(); draw();
         };
         canvas.addEventListener("pointerup", endDrag);
         canvas.addEventListener("pointercancel", endDrag);
@@ -363,8 +433,11 @@ function setup(node) {
                 b.classList.toggle("on", view === v);
                 tabs.appendChild(b);
             };
-            mk("Target (canvas)", "target");
-            viewRefs().forEach((r) => mk(`Ref ${r}`, r));
+            // A ⚠ count = elements still waiting for a box in that view, so every tab stays linked to the others.
+            const pending = (v) => els.filter((e) => (v === "target" ? usesTgt(e) && !e.tgt : usesSrc(e) && e.ref === v && !e.src)).length;
+            const badge = (v) => (pending(v) ? ` ⚠ ${pending(v)}` : "");
+            mk("Target (canvas)" + badge("target"), "target");
+            viewRefs().forEach((r) => mk(`Ref ${r}` + badge(r), r));
         }
         const fmt = (b) => `[${b.join(", ")}]`;
         const statusOf = (el) => {
@@ -375,19 +448,44 @@ function setup(node) {
                 return { text: parts.join("  ") || "ok", bad: false };
             }
             const need = [];
-            if (el.kind !== "new" && !el.src) need.push(`source on Ref ${el.ref ?? "?"}`);
-            if (usesTgt(el) && !el.tgt) need.push("target on Target");
-            return { text: "⚠ draw " + need.join(" and "), bad: true };
+            if (el.kind !== "new" && !el.src) need.push(`not drawn yet on Ref ${el.ref ?? "?"}`);
+            if (usesTgt(el) && !el.tgt) need.push("target not drawn yet on Target");
+            return { text: "⚠ " + (el.kind !== "new" && !el.src ? "source " : "") + need.join(" · "), bad: true };
         };
         const statusEls = [];
         function refreshStatus() {
-            statusEls.forEach(({ el, node: n }) => { const s = statusOf(el); n.textContent = s.text; n.style.color = s.bad ? "#ff6b6b" : "rgba(255,255,255,0.45)"; });
+            statusEls.forEach(({ el, node: n, jumps }) => {
+                const s = statusOf(el); n.textContent = s.text; n.style.color = s.bad ? "#ff6b6b" : "rgba(255,255,255,0.45)";
+                jumps.forEach(({ b, missing }) => { b.style.borderColor = missing() ? "#ff6b6b" : ""; b.style.color = missing() ? "#ff6b6b" : ""; });
+            });
             const bad = els.filter((e) => !complete(e)).length;
-            status.textContent = bad ? `${els.length} elements · ${bad} incomplete` : `${els.length} element${els.length === 1 ? "" : "s"}`;
+            const count = `${els.length} element${els.length === 1 ? "" : "s"}`;
+            status.textContent = bad ? `${count} · ${bad} incomplete` : count;
             status.classList.toggle("bad", bad > 0);
         }
+        // Reset: remove every element and go back to Target. Two clicks, so a stray one can't wipe the work.
+        let resetTimer = null;
+        const disarm = () => {
+            clearTimeout(resetTimer);
+            delete resetBtn.dataset.armed;
+            resetBtn.textContent = "Reset"; resetBtn.style.color = ""; resetBtn.style.borderColor = "";
+        };
+        const resetBtn = nkdButton("Reset", () => {
+            if (!els.length) return;
+            if (!resetBtn.dataset.armed) {
+                resetBtn.dataset.armed = "1";
+                resetBtn.textContent = "Clear all? Click again";
+                resetBtn.style.color = "#ff6b6b"; resetBtn.style.borderColor = "#ff6b6b";
+                resetTimer = setTimeout(disarm, 3000);
+                return;
+            }
+            disarm();
+            els.length = 0; sel = -1; view = "target"; drag = null;
+            commit(); renderTabs(); renderList(); draw();
+        }, "Remove every element and start clean");
         panelHead.replaceChildren(
             Object.assign(document.createElement("span"), { textContent: "Elements", style: "flex:1;font-weight:500;" }),
+            resetBtn,
             nkdButton("+ Add", () => { addElement(typeof view === "number" ? "move" : "new"); commit(); renderTabs(); renderList(); draw(); }, "Add an element, then draw its box"),
         );
 
@@ -423,23 +521,45 @@ function setup(node) {
                 row.append(idIn, del);
                 const row2 = document.createElement("div");
                 row2.style.cssText = "display:flex;gap:6px;";
-                const kindSel = nkdSelect(KINDS, el.kind, (v) => {
-                    el.kind = v;
-                    el.ref = v === "new" ? null : (el.ref ?? defaultRef());
+                // Source: where the thing comes from. None = just an instruction at this box.
+                const srcOpts = [{ value: "", label: "No source — instruction" }];
+                for (let r = 0; r < 8; r++) srcOpts.push({ value: String(r), label: `from ref ${r}` });
+                row2.appendChild(nkdSelect(srcOpts, el.ref == null ? "" : String(el.ref), (v) => {
+                    if (v === "") { el.kind = "new"; el.ref = null; el.src = null; }
+                    else { el.ref = Number(v); if (el.kind === "new") el.kind = "move"; }
                     commit(); renderTabs(); renderList(); draw();
-                });
-                row2.appendChild(kindSel);
-                if (el.kind !== "new") {
-                    const refs = []; for (let r = 0; r < 8; r++) refs.push({ value: String(r), label: `from ref ${r}` });
-                    row2.appendChild(nkdSelect(refs, String(el.ref ?? 0), (v) => { el.ref = Number(v); commit(); renderTabs(); renderList(); draw(); }));
+                }, "Which reference this comes from (ref N). In your caption it is <ref_image_N>. Pick one, then draw its box on that Ref tab."));
+                if (el.ref != null) {
+                    row2.appendChild(nkdSelect(KINDS, el.kind, (v) => { el.kind = v; commit(); renderTabs(); renderList(); draw(); }));
                 }
                 const desc = Object.assign(document.createElement("textarea"), { value: el.desc, rows: 2, placeholder: "Describe it (material, colour, pose…)" });
                 desc.style.cssText = "resize:vertical;background:#252830;border:1px solid #3a3d46;border-radius:4px;color:#c8d0e0;padding:4px 6px;font:12px system-ui;";
                 desc.oninput = () => { el.desc = desc.value; commit(); };
+                // The tags to type in the caption: the element's own id and its reference (counted from 0).
+                const tagsLine = document.createElement("div");
+                tagsLine.style.cssText = "font-size:11px;color:rgba(255,255,255,0.35);";
+                const refreshTags = () => { tagsLine.textContent = `Caption tags: <${el.id || "id"}>` + (el.ref != null ? ` · <ref_image_${el.ref}>` : ""); };
+                refreshTags();
+                idIn.addEventListener("input", refreshTags);
                 const st = document.createElement("div");
-                st.style.cssText = "font-size:11px;font-variant-numeric:tabular-nums;";
-                statusEls.push({ el, node: st });
-                card.append(row, row2, desc, st);
+                st.style.cssText = "font-size:11px;font-variant-numeric:tabular-nums;flex:1;min-width:0;";
+                // Jump straight to the other half of this element (its box on the reference / on the canvas).
+                const jumps = [];
+                const go = (label, target, missing, title) => {
+                    const b = nkdButton(label, () => { view = target; sel = i; renderTabs(); styleCards(); draw(); }, title);
+                    b.style.padding = "2px 7px"; b.style.fontSize = "11px";
+                    jumps.push({ b, missing });
+                    return b;
+                };
+                const links = document.createElement("div");
+                links.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;";
+                if (el.ref != null) links.appendChild(go(`↗ Ref ${el.ref}`, el.ref, () => usesSrc(el) && !el.src, `Go to Ref ${el.ref} to draw where it comes from`));
+                if (usesTgt(el)) links.appendChild(go("↗ Target", "target", () => usesTgt(el) && !el.tgt, "Go to Target to draw where it ends up"));
+                const foot = document.createElement("div");
+                foot.style.cssText = "display:flex;flex-direction:column;gap:4px;";
+                foot.append(st, links);
+                statusEls.push({ el, node: st, jumps });
+                card.append(row, row2, desc, tagsLine, foot);
                 list.appendChild(card);
             });
             refreshStatus();
@@ -452,18 +572,3 @@ function setup(node) {
         renderTabs(); renderList(); draw();
     }
 }
-
-app.registerExtension({
-    name: "NKD.Klein.BoxEditor",
-    async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData.name !== NODE_NAME) return;
-        if (nodeType.prototype.__nkdBoxWrapped) return;
-        nodeType.prototype.__nkdBoxWrapped = true;
-        const orig = nodeType.prototype.onNodeCreated;
-        nodeType.prototype.onNodeCreated = function () {
-            const r = orig?.apply(this, arguments);
-            setup(this);
-            return r;
-        };
-    },
-});

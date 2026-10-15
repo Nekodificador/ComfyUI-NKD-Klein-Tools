@@ -348,6 +348,54 @@ def _clamp_to_megapixel(width: int, height: int, target_pixels: int = 1_048_576)
     return _scale_to_megapixels(width, height, target_pixels)
 
 
+def _ref_previews(refs, max_side: int = 1024) -> list:
+    """Save each reference (first frame, long side <= max_side) as a temp preview and
+    return [{"i", filename, subfolder, type}] so the box editor can show images that were
+    generated upstream (they have no preview of their own until they run)."""
+    import nodes as comfy_nodes
+    saver = comfy_nodes.PreviewImage()
+    out = []
+    for i, img in enumerate(refs):
+        img = img[:1, :, :, :3]
+        h, w = int(img.shape[1]), int(img.shape[2])
+        if max(h, w) > max_side:
+            s = max_side / max(h, w)
+            img = _resize(img, max(1, round(w * s)), max(1, round(h * s)))
+        item = saver.save_images(img, "nkd_klein_ref")["ui"]["images"][0]
+        out.append({"i": i, **item})
+    return out
+
+
+def _flux3_kv_scale(amount: float) -> float:
+    """Reference weight (0..2, 1.0 = neutral) -> k/v multiplier for Klein 3.
+
+    Calibrated by sweeping the raw multiplier on Klein 3 (two scenes, two seeds):
+      * below: pose/structure adherence flips between x0.9 and x0.7 (centre ~x0.8) and
+        everything under ~x0.65 is the same "reference removed" plateau, so the slider
+        runs 0 -> x0.65 ... 1 -> x1.0 in a straight line: the transition ends up in the
+        middle of the slider instead of its top third;
+      * above: the reference's influence rises almost entirely between x1.0 and x1.10,
+        then the image saturates (and past ~x1.25 it breaks down), so 1 -> 2 only
+        reaches x1.12."""
+    a = max(0.0, min(2.0, float(amount)))
+    return 0.65 + 0.35 * a if a <= 1.0 else 1.0 + 0.12 * (a - 1.0)
+
+
+def _reference_encode_size(ref_w: int, ref_h: int, grid_w: int, grid_h: int,
+                           tolerance: float = 0.02) -> Tuple[int, int]:
+    """Pixel size an additional reference is resized to before encoding.
+
+    Same shape as ref_0's grid (within `tolerance`): the exact grid, so the references stay
+    aligned. Any other shape: keep its OWN aspect at the same pixel budget as the grid;
+    stretching it to ref_0's shape squashes whatever it shows (a round apple turns into a
+    flat one), and boxes drawn on that reference are normalised to its own image, so they
+    only stay valid if the image is not padded or distorted."""
+    grid_aspect = grid_w / grid_h
+    if abs(ref_w / ref_h - grid_aspect) / grid_aspect <= tolerance:
+        return grid_w, grid_h
+    return _clamp_to_megapixel(ref_w, ref_h, grid_w * grid_h)
+
+
 def _resolve_resolution(
     aspect_ratio: str,
     megapixels,

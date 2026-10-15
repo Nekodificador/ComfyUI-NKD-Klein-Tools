@@ -3,7 +3,7 @@ from typing import Optional
 import logging
 import torch
 from comfy_api.latest import io
-from .box_prompt import build_box_prompt
+from .box_prompt import build_from_state
 from .klein_types import KleinBundle, NKDKleinBundleType
 from .helpers import (
     _HAS_CV2,
@@ -16,6 +16,8 @@ from .helpers import (
     _encode_reference_latent,
     _apply_reference_latent,
     _set_reference_method,
+    _reference_encode_size,
+    _ref_previews,
     _is_flux3,
     _resolve_resolution,
     _round_vae,
@@ -54,24 +56,20 @@ class NKDKleinPresampling(io.ComfyNode):
                     tooltip=(
                         "Which Klein you connected. This only decides which settings "
                         "are shown: Klein 2 shows Reference Strength, Klein 3 shows "
-                        "Bounding Boxes. The node always detects the real model "
-                        "itself when it runs."
+                        "the Draw boxes editor. The node always detects the real "
+                        "model itself when it runs."
                     )),
 
                 io.String.Input("positive", default="", multiline=True,
-                    tooltip="Describe what you want in the image."),
+                    tooltip=(
+                        "Describe what you want in the image. To use a reference, say "
+                        "what you want from it and which image it is: \"the red apple "
+                        "from the second image\" (the first image is ref_0)."
+                    )),
                 io.String.Input("negative", default="", multiline=True,
                     tooltip="Describe what you don't want."),
-                io.String.Input("bounding_boxes", default="", multiline=True,
-                    display_name="Bounding Boxes",
-                    tooltip=(
-                        "Klein 3 only. Place, move or remove things by box, one "
-                        "element per line, e.g.\n"
-                        "apple_1 from 1: A red apple. | [158,140,908,860] -> [300,380,700,720]\n"
-                        "Boxes are [top, left, bottom, right] on a 0–1000 grid. They "
-                        "are added to the end of your prompt. Same format as the Box "
-                        "Prompt node."
-                    )),
+                io.String.Input("boxes_json", default="", multiline=False, socketless=True,
+                    tooltip="Boxes drawn in the editor (managed by the widget). Klein 3 only."),
 
                 io.Boolean.Input("pin_model", default=False,
                     tooltip=(
@@ -264,6 +262,9 @@ class NKDKleinPresampling(io.ComfyNode):
                         "same prepared image."
                     )),
             ],
+            # Output node so it can run on its own (up to Presampling) and hand the box editor
+            # the references as previews: images generated upstream have none until they run.
+            is_output_node=True,
         )
 
     @classmethod
@@ -293,23 +294,13 @@ class NKDKleinPresampling(io.ComfyNode):
         detail_padding: int = 50,
         reference_strength: int = 0,
         model_family: str = "Klein 2",
-        bounding_boxes: str = "",
+        boxes_json: str = "",
     ) -> io.NodeOutput:
 
         # 0. Pin model in VRAM if requested
         if pin_model:
             from comfy import model_management
             model_management.load_models_gpu([model])
-
-        # 1. Encode prompts (Klein 3: boxes go at the end of the prompt)
-        if bounding_boxes.strip():
-            if _is_flux3(model):
-                positive = build_box_prompt(positive, bounding_boxes)
-            else:
-                logging.getLogger(__name__).warning(
-                    "NKD Klein Presampling: Bounding Boxes only work with Klein 3 — ignored.")
-        pos = clip.encode_from_tokens_scheduled(clip.tokenize(positive))
-        neg = clip.encode_from_tokens_scheduled(clip.tokenize(negative))
 
         refs = [v for v in ref_images.values() if v is not None]
         ref_0 = refs[0] if refs else None
@@ -381,8 +372,10 @@ class NKDKleinPresampling(io.ComfyNode):
         if not has_image:
             ref_0_out = None
         elif aspect_mismatch and image_fit == "Native":
+            # Slide is hidden in Native (only Outpaint / Center Crop show it), so this
+            # preview stays centred instead of following a value saved from an earlier fit.
             ref_0_out = _fit_image_to_canvas(
-                ref_0, width, height, "letterbox", fill="gray", slide=slide
+                ref_0, width, height, "letterbox", fill="gray", slide=0.5
             )
         else:
             ref_0_out = image_resized
@@ -421,6 +414,24 @@ class NKDKleinPresampling(io.ComfyNode):
                 _megapixels_to_pixels(megapixels),
             )
             orig_size = (native_h, native_w)
+
+        # 5b. Encode the prompts. Klein 3: the boxes drawn in the editor go at the end of the
+        # prompt; with detailing they are first mapped into the zoomed area, since the
+        # model only sees that crop of ref_0.
+        if boxes_json.strip():
+            if _is_flux3(model):
+                crop = (ref_0.shape[2], ref_0.shape[1], crop_box) if crop_box is not None else None
+                gone: list = []
+                positive = build_from_state(positive, boxes_json, crop=crop, dropped=gone)
+                if gone:
+                    logging.getLogger(__name__).warning(
+                        "NKD Klein Presampling: boxes outside the detailing area were skipped: %s",
+                        ", ".join(gone))
+            else:
+                logging.getLogger(__name__).warning(
+                    "NKD Klein Presampling: boxes only work with Klein 3 — ignored.")
+        pos = clip.encode_from_tokens_scheduled(clip.tokenize(positive))
+        neg = clip.encode_from_tokens_scheduled(clip.tokenize(negative))
 
         # 6. Encode the main latent (we may reuse it as the primary reference).
         # In detailing mode the patch is encoded once here and reused for both
@@ -484,18 +495,20 @@ class NKDKleinPresampling(io.ComfyNode):
                 applied_reference = True
 
             # Additional references (ref_1, ref_2, …).
-            # With Resize on, they must share ref_0's latent grid: ref_0's
-            # reference latent is NOT always canvas-sized (Compose encodes it at
-            # native aspect, detailing uses the crop), and under the "index"
-            # method a mismatched grid surfaces as spatial misalignment, so we
-            # resize ref_1+ to ref_0's exact grid (latent H×W × VAE factor 16).
+            # With Resize on, a reference with the same shape as ref_0 is resized to ref_0's
+            # exact latent grid (ref_0's reference latent is NOT always canvas-sized: Compose
+            # encodes it at native aspect, detailing uses the crop, and under the "index"
+            # method a mismatched grid surfaces as spatial misalignment). A reference with
+            # ANOTHER shape keeps its own aspect instead of being stretched to ref_0's.
             # With Resize off, the node touches no sizes — encode each at native.
             for ref_img in refs[1:]:
-                if resize and ref0_latent is not None:
-                    ref_aligned = _resize(ref_img, ref0_latent.shape[3] * 16, ref0_latent.shape[2] * 16)
-                    ref_latent = _encode_reference_latent(ref_aligned, vae, skip_clamp=True)
-                elif resize:
-                    ref_aligned = _resize(ref_img, width, height)
+                if resize:
+                    if ref0_latent is not None:
+                        grid_w, grid_h = ref0_latent.shape[3] * 16, ref0_latent.shape[2] * 16
+                    else:
+                        grid_w, grid_h = width, height
+                    rw, rh = _reference_encode_size(ref_img.shape[2], ref_img.shape[1], grid_w, grid_h)
+                    ref_aligned = _resize(ref_img, rw, rh)
                     ref_latent = _encode_reference_latent(ref_aligned, vae, skip_clamp=True)
                 else:
                     ref_latent = _encode_reference_latent(ref_img, vae, skip_clamp=True)
@@ -586,7 +599,10 @@ class NKDKleinPresampling(io.ComfyNode):
         # canvas-sized tensor so the socket type stays consistent).
         if ref_0_out is None:
             ref_0_out = torch.zeros(1, height, width, 3, dtype=torch.float32)
-        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask, ref_0_out)
+        # Klein 3: hand the box editor the references as previews (images generated upstream
+        # have no preview of their own).
+        ui = {"nkd_box_refs": _ref_previews(refs)} if refs and _is_flux3(model) else None
+        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask, ref_0_out, ui=ui)
 
 
 def _make_empty_latent(width: int, height: int) -> dict:

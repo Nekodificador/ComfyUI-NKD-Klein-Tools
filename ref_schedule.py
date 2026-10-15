@@ -89,7 +89,7 @@ def _step_progress(extra_options) -> float:
     return idx / n_steps if n_steps > 0 else 0.0
 
 
-def _effective_scale(schedule, weight: float, extra_options) -> float:
+def _effective_scale(schedule, weight: float, extra_options, mapper=None) -> float:
     """Resolve the k/v multiplier for the current step.
 
     `weight` is the attention multiplier (0..2, 1.0 = neutral; <1 dilutes,
@@ -102,7 +102,7 @@ def _effective_scale(schedule, weight: float, extra_options) -> float:
     extra_options = extra_options or {}
     curve = 1.0 if schedule is None else _curve_value(schedule, _step_progress(extra_options))
     amount = weight * curve
-    return _amount_to_kv_scale(amount)
+    return (mapper or _amount_to_kv_scale)(amount)
 
 
 def _ref_token_range(extra_options, reference_index):

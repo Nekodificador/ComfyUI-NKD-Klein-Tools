@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+import { attachBoxEditor } from "./nkd_box_editor.js";
 
 // Classic (LiteGraph) DOM widgets mis-size laterally on selection / DOM
 // interaction — ballooning to canvas width or collapsing — while node.size[0]
@@ -155,7 +156,8 @@ function wrapWidgetCallback(node, name, handler) {
 // drives what is visible — the backend detects the real model when it runs.
 function updateModelWidgets(node) {
     const klein3 = getWidgetValue(node, "model_family") === "Klein 3";
-    setWidgetVisible(node, "bounding_boxes", klein3);
+    const boxBtn = node._nkdBoxBtn;                       // ✎ Draw boxes (Klein 3 only)
+    if (boxBtn) { if (klein3) showWidget(boxBtn); else hideWidget(boxBtn); }
     updateResolutionWidgets(node);          // owns reference_strength (needs a reference AND Klein 2)
 }
 
@@ -466,7 +468,7 @@ function guardWidgetOrder(nodeType, nodeName, version, newDefaults = {}) {
 }
 
 const KLEIN_NEW_WIDGET_DEFAULTS = {
-    NKDKleinPresampling: { model_family: "Klein 2", bounding_boxes: "" },
+    NKDKleinPresampling: { model_family: "Klein 2", boxes_json: "" },
 };
 
 const KLEIN_SCHEMA_VERSIONS = {
@@ -478,7 +480,6 @@ const KLEIN_SCHEMA_VERSIONS = {
     NKDKleinReferenceFit: 1,
     NKDKleinPromptBuilder: 1,
     NKDKleinBoxPrompt: 1,
-    NKDKleinBoxEditor: 1,
 };
 
 app.registerExtension({
@@ -499,6 +500,7 @@ app.registerExtension({
             const origOnCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 origOnCreated?.apply(this, arguments);
+                attachBoxEditor(this);
                 requestAnimationFrame(() => {
                     setupPresamplingTriggers(this);
                     updateModelWidgets(this);
