@@ -3,6 +3,7 @@ from typing import Optional
 import logging
 import torch
 from comfy_api.latest import io
+from .box_prompt import build_box_prompt
 from .klein_types import KleinBundle, NKDKleinBundleType
 from .helpers import (
     _HAS_CV2,
@@ -15,6 +16,7 @@ from .helpers import (
     _encode_reference_latent,
     _apply_reference_latent,
     _set_reference_method,
+    _is_flux3,
     _resolve_resolution,
     _round_vae,
     _megapixels_to_pixels,
@@ -47,10 +49,29 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Clip.Input("clip", tooltip="The text encoder that goes with the model."),
                 io.Vae.Input("vae",  tooltip="The VAE that goes with the model."),
 
+                io.Combo.Input("model_family", options=["Klein 2", "Klein 3"], default="Klein 2",
+                    display_name="Model",
+                    tooltip=(
+                        "Which Klein you connected. This only decides which settings "
+                        "are shown: Klein 2 shows Reference Strength, Klein 3 shows "
+                        "Bounding Boxes. The node always detects the real model "
+                        "itself when it runs."
+                    )),
+
                 io.String.Input("positive", default="", multiline=True,
                     tooltip="Describe what you want in the image."),
                 io.String.Input("negative", default="", multiline=True,
                     tooltip="Describe what you don't want."),
+                io.String.Input("bounding_boxes", default="", multiline=True,
+                    display_name="Bounding Boxes",
+                    tooltip=(
+                        "Klein 3 only. Place, move or remove things by box, one "
+                        "element per line, e.g.\n"
+                        "apple_1 from 1: A red apple. | [158,140,908,860] -> [300,380,700,720]\n"
+                        "Boxes are [top, left, bottom, right] on a 0–1000 grid. They "
+                        "are added to the end of your prompt. Same format as the Box "
+                        "Prompt node."
+                    )),
 
                 io.Boolean.Input("pin_model", default=False,
                     tooltip=(
@@ -271,6 +292,8 @@ class NKDKleinPresampling(io.ComfyNode):
         use_detailing: bool = False,
         detail_padding: int = 50,
         reference_strength: int = 0,
+        model_family: str = "Klein 2",
+        bounding_boxes: str = "",
     ) -> io.NodeOutput:
 
         # 0. Pin model in VRAM if requested
@@ -278,7 +301,13 @@ class NKDKleinPresampling(io.ComfyNode):
             from comfy import model_management
             model_management.load_models_gpu([model])
 
-        # 1. Encode prompts
+        # 1. Encode prompts (Klein 3: boxes go at the end of the prompt)
+        if bounding_boxes.strip():
+            if _is_flux3(model):
+                positive = build_box_prompt(positive, bounding_boxes)
+            else:
+                logging.getLogger(__name__).warning(
+                    "NKD Klein Presampling: Bounding Boxes only work with Klein 3 — ignored.")
         pos = clip.encode_from_tokens_scheduled(clip.tokenize(positive))
         neg = clip.encode_from_tokens_scheduled(clip.tokenize(negative))
 
@@ -479,7 +508,8 @@ class NKDKleinPresampling(io.ComfyNode):
             # — no mixed-resolution spatial overlap — and makes ref_index_scale
             # the real per-reference strength lever that reference_strength and
             # the Ref Schedule nodes drive.
-            if applied_reference:
+            # Flux3 has neither method (refs sit on their own RoPE axis).
+            if applied_reference and not _is_flux3(model):
                 pos = _set_reference_method(pos, "index")
                 neg = _set_reference_method(neg, "index")
 
@@ -498,7 +528,11 @@ class NKDKleinPresampling(io.ComfyNode):
                 ts_to   = m.inner_model.model_sampling.timestep(sigma_to)
                 current_ts = m.inner_model.model_sampling.timestep(sigma[0])
                 threshold = (current_ts - ts_to) / (ts_from - ts_to)
-                binary_mask = (denoise_mask >= threshold).to(denoise_mask.dtype)
+                # The mask reaching the sampler tops out just under 1.0 (~0.996), and the
+                # first step's threshold is exactly 1.0: without snapping, the binary mask
+                # is EMPTY at step 1 and the region keeps the original there.
+                full = torch.where(denoise_mask >= 0.99, torch.ones_like(denoise_mask), denoise_mask)
+                binary_mask = (full >= threshold).to(denoise_mask.dtype)
                 if blend < 1.0:
                     return blend * binary_mask + (1.0 - blend) * denoise_mask
                 return binary_mask
@@ -512,7 +546,7 @@ class NKDKleinPresampling(io.ComfyNode):
         # canvas index, increasing the attention's positional anchor.
         # Applied via add_object_patch so the change is scoped to this sample
         # and reverts automatically when ComfyUI unpatches the model.
-        if reference_strength != 0 and not bypass_reference:
+        if reference_strength != 0 and not bypass_reference and not _is_flux3(model):
             new_scale = REF_INDEX_SCALE_MAP.get(int(reference_strength), 10.0)
             try:
                 model.add_object_patch("diffusion_model.params.ref_index_scale", new_scale)

@@ -1,5 +1,15 @@
 # Changelog
 
+## What's new in 1.12.x
+
+- **Klein 3 support** — Presampling now works with FLUX.3 Klein as well as Klein 2. A new **Model** selector at the top (*Klein 2* / *Klein 3*) decides which settings you see: *Reference Strength* for Klein 2, and a new **Bounding Boxes** box for Klein 3 (same one-line-per-element format as Box Prompt, added to the end of your prompt). The selector only changes what is shown; the node always detects the real model when it runs.
+- **New node: 😺NKD Klein Box Editor** *(Klein 3)* — **draw** the boxes instead of typing them. Open the editor from the node, drag on the image to add an element, describe it, and choose whether it is *new*, *kept*, *moved* or *removed*. Connect the images you edit to see them under your boxes, and switch between the output canvas and each reference to draw where something comes from and where it goes. Works on the classic canvas and on Nodes 2.0. See [the nodes](nodes.md#nkd-klein-box-editor-optional-klein-3).
+- **Fix: *Inpaint Blend* at 1.0** — with a masked edit the area inside the mask could come out identical to the original (the thing you asked for never appeared), most noticeably with few-step models. The first step was being thrown away; it now regenerates as it should.
+- **Fix: *Use Detailing* edge case** — a mask that ran edge to edge across an image whose width or height isn't a multiple of 16 left its first few columns (or rows) outside the zoomed area, so they came back unchanged. The zoom area now always covers your whole mask.
+- **Breaking (Presampling only):** the two new settings sit at the top of the node, so workflows saved with an older version are repaired on load by setting name — open them once and re-save. On an older ComfyUI frontend that can't do this you'll get a warning; delete and re-add the node then.
+- **New node: 😺NKD Klein Box Prompt** *(Klein 3)* — place, move or remove things by bounding box with one line per element. See [the nodes](nodes.md#nkd-klein-box-prompt-optional-klein-3).
+- **Reference Weight / Control / Region on Klein 3** — they pick the right mechanism for the connected model. Dilution (below 1) works as before; strengthening above 1 is much more sensitive on Klein 3, so the boost is gentler. On Klein 3, Region *holds a reference back* outside the zone but does not move it into the zone — use Box Prompt to say *where* something goes.
+
 ## What's new in 1.11.x
 
 - **New *Transparent Background*** *(Postsampling)* — outputs the result with an alpha channel: the regenerated area stays opaque and everything else becomes transparent, ready to save as a PNG cutout or composite elsewhere. It uses the mask (or the auto-detected region) to know what to keep, so a run without either comes out as a normal image. Saves wiring an invert + join-alpha pair by hand.

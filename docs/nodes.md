@@ -41,6 +41,31 @@ Goes **before** Presampling, not on the model line: scales a reference image so 
 Assembles a prompt from your own text plus curated preset dropdowns, with a live preview, and outputs a string you connect to Presampling's positive input. Choose flowing prose (best for Klein) or a structured JSON template. The dropdown presets live in `klein_presets.json` — edit that file (then restart ComfyUI) to customise them.
 
 
+### 😺NKD Klein Box Prompt *(optional, Klein 3)*
+
+Places, moves or removes things by **bounding box**. Write a caption, then one line per element, and the node adds the layout list that Klein 3 reads; connect it to Presampling's positive input (or type the same lines straight into Presampling's *Bounding Boxes* box on Klein 3). Boxes are `[top, left, bottom, right]` on a 0–1000 grid and guide placement and size — they are not a hard mask.
+
+```
+apple_1 from 1: A glossy red apple. | [158,140,908,860] -> [300,380,700,720]
+cat_1 from 0: A tabby cat. | [265,40,855,400] -> remove
+base_1 from 0: The background. | [0,0,1000,1000] -> keep
+bird_1: A small bird. | -> [450,500,480,530]
+sky_1: A pale sky. | [0,0,400,1000]
+```
+
+`from N` is the reference number (0 = ref_0). `-> remove` deletes the element, `-> keep` pins it in place, and a line with only a box places something new. In the caption, tag elements with `<id>` and refer to references as `<ref_image_0>`, `<ref_image_1>`…
+
+### 😺NKD Klein Box Editor *(optional, Klein 3)*
+
+The same job as Box Prompt, but you **draw** the boxes. Click **✎ Draw boxes** on the node to open the editor:
+
+- **Drag on empty space** to add an element; drag a box to move it, use its handles to resize, press `Del` to remove it.
+- Each element is **New** (add something here), **Move**, **Keep in place** or **Remove**. For the last three, pick which reference it comes from.
+- Use the tabs above the image to switch between **Target** (the output canvas) and each **Ref**: draw where something *comes from* on its reference, and where it *goes* on Target.
+- Connect the images you edit to ref_0, ref_1… so you see them under your boxes. Without them you get a blank canvas with the shape set by `width`/`height`.
+
+The `prompt` output (your caption plus the box list) goes into Presampling's positive input; `elements` gives just the lines, ready for Presampling's *Bounding Boxes* box.
+
 ---
 
 [← NKD Klein Tools](../README.md)

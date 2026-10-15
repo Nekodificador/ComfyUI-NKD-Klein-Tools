@@ -200,6 +200,10 @@ class NKDKleinReferenceWeight(io.ComfyNode):
     @classmethod
     def execute(cls, model, reference_index: int = 1, schedule=None,
                 weight: float = 1.0) -> io.NodeOutput:
+        from .helpers import _is_flux3
+        if _is_flux3(model):
+            from .flux3_attn import add_rule
+            return io.NodeOutput(add_rule(model, reference_index, schedule, weight))
         m = model.clone()
         m.set_model_attn1_patch(
             _make_attn_patch(schedule, weight, reference_index=int(reference_index))

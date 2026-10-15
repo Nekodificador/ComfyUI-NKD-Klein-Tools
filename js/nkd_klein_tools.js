@@ -151,7 +151,16 @@ function wrapWidgetCallback(node, name, handler) {
     w._nkd_cb_wrapped = true;
 }
 
+// Klein 2 shows Reference Strength; Klein 3 shows Bounding Boxes. The combo only
+// drives what is visible — the backend detects the real model when it runs.
+function updateModelWidgets(node) {
+    const klein3 = getWidgetValue(node, "model_family") === "Klein 3";
+    setWidgetVisible(node, "bounding_boxes", klein3);
+    updateResolutionWidgets(node);          // owns reference_strength (needs a reference AND Klein 2)
+}
+
 function setupPresamplingTriggers(node) {
+    wrapWidgetCallback(node, "model_family", updateModelWidgets);
     wrapWidgetCallback(node, "resize", updateResolutionWidgets);
     wrapWidgetCallback(node, "aspect_ratio", updateResolutionWidgets);
     wrapWidgetCallback(node, "image_fit", updateResolutionWidgets);
@@ -204,7 +213,8 @@ function updateResolutionWidgets(node) {
 
     // Reference-only controls.
     setWidgetVisible(node, "bypass_reference", refOn);
-    setWidgetVisible(node, "reference_strength", refOn);
+    // Reference Strength only exists on Klein 2 (see updateModelWidgets).
+    setWidgetVisible(node, "reference_strength", refOn && getWidgetValue(node, "model_family") !== "Klein 3");
 
     // Image Fit only does something when the canvas ratio can differ from the
     // source: needs Resize on, a reference connected, and a non-"As Reference"
@@ -400,6 +410,87 @@ function updateControlWidgets(node) {
     refreshNode(node);
 }
 
+
+// ── Widget-order guard (same mechanism as the other NKD packs; see the nkd-node
+// skill). `widgets_values` is positional, so reordering a node's widgets would load
+// old workflows' values into the wrong widgets. The frontend (≥1.49.6) always saves
+// `widgets_values_named`; re-apply it BY NAME on load. No map + no schema stamp →
+// the positional restore mis-assigned things, so say so (only for version > 1).
+// Bump a node's version ONLY on a deliberate breaking reorder, and list it in the
+// release notes.
+const SCHEMA_PROP = "nkdSchema";
+
+function guardWidgetOrder(nodeType, nodeName, version, newDefaults = {}) {
+    const origCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+        const r = origCreated?.apply(this, arguments);
+        this.properties = this.properties || {};
+        this.properties[SCHEMA_PROP] = version;
+        return r;
+    };
+    const origConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (info) {
+        const r = origConfigure?.apply(this, arguments);
+        const named = info?.widgets_values_named;
+        if (named && typeof named === "object" && !Array.isArray(named)) {
+            for (const [name, val] of Object.entries(named)) {
+                const w = this.widgets?.find(x => x.name === name);
+                if (w && w.value !== val) {
+                    w.value = val;
+                    w.callback?.(val);
+                }
+            }
+            // Widgets added after the save aren't in the map; the positional restore
+            // left them holding some other widget's value, so put their default back.
+            for (const [name, def] of Object.entries(newDefaults)) {
+                const w = this.widgets?.find(x => x.name === name);
+                if (w && !(name in named) && w.value !== def) {
+                    w.value = def;
+                    w.callback?.(def);
+                }
+            }
+        } else if (version > 1
+            && info?.properties?.[SCHEMA_PROP] !== version
+            && Array.isArray(info?.widgets_values) && info.widgets_values.length) {
+            app.extensionManager?.toast?.add?.({
+                severity: "warn",
+                summary: `😺${nodeName}`,
+                detail: `"${this.title ?? nodeName}" was saved before a widget reorder: its `
+                    + "values may have loaded into the wrong widgets. Delete and re-add the "
+                    + "node, then re-check its settings.",
+                life: 12000,
+            });
+        }
+        return r;
+    };
+}
+
+const KLEIN_NEW_WIDGET_DEFAULTS = {
+    NKDKleinPresampling: { model_family: "Klein 2", bounding_boxes: "" },
+};
+
+const KLEIN_SCHEMA_VERSIONS = {
+    NKDKleinPresampling: 2,        // v2: Model + Bounding Boxes widgets added up front
+    NKDKleinPostsampling: 1,
+    NKDKleinReferenceWeight: 1,
+    NKDKleinReferenceControl: 1,
+    NKDKleinReferenceRegion: 1,
+    NKDKleinReferenceFit: 1,
+    NKDKleinPromptBuilder: 1,
+    NKDKleinBoxPrompt: 1,
+    NKDKleinBoxEditor: 1,
+};
+
+app.registerExtension({
+    name: "nkd.klein_tools.schema_guard",
+    async beforeRegisterNodeDef(nodeType, nodeData) {
+        const version = KLEIN_SCHEMA_VERSIONS[nodeData?.name];
+        if (!version || nodeType.prototype.__nkdSchemaGuarded) return;
+        nodeType.prototype.__nkdSchemaGuarded = true;     // "Refresh node definitions"
+        guardWidgetOrder(nodeType, nodeData.name, version, KLEIN_NEW_WIDGET_DEFAULTS[nodeData.name]);
+    },
+});
+
 app.registerExtension({
     name: "nkd.klein_tools",
 
@@ -410,6 +501,7 @@ app.registerExtension({
                 origOnCreated?.apply(this, arguments);
                 requestAnimationFrame(() => {
                     setupPresamplingTriggers(this);
+                    updateModelWidgets(this);
                     updateResolutionWidgets(this);
                     updateMaskWidgets(this);
                 });
@@ -423,6 +515,7 @@ app.registerExtension({
                     warnIfStalePresampling(this);
                     migrateLegacyMegapixels(this);
                     setupPresamplingTriggers(this);
+                    updateModelWidgets(this);
                     updateResolutionWidgets(this);
                 });
             };
@@ -430,6 +523,7 @@ app.registerExtension({
             const origOnWidgetChanged = nodeType.prototype.onWidgetChanged;
             nodeType.prototype.onWidgetChanged = function (name, value) {
                 origOnWidgetChanged?.apply(this, arguments);
+                if (name === "model_family") updateModelWidgets(this);
                 if (name === "resize" || name === "aspect_ratio" || name === "image_fit") {
                     updateResolutionWidgets(this);
                 }

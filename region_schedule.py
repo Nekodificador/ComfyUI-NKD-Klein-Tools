@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from comfy_api.latest import io
 
 from .ref_schedule import _ref_token_range, _effective_scale
+from .helpers import _is_flux3
 
 _log = logging.getLogger(__name__)
 
@@ -64,10 +65,13 @@ def _compute_region_vec(model, latent, mask, region_hardness):
         return None
     samples = latent["samples"] if isinstance(latent, dict) else latent
     lat_h, lat_w = int(samples.shape[-2]), int(samples.shape[-1])
-    try:
-        patch_size = int(model.model.diffusion_model.patch_size)
-    except Exception:
-        patch_size = 2
+    if _is_flux3(model):
+        patch_size = 1                                  # Flux3 tokens = latent cells
+    else:
+        try:
+            patch_size = int(model.model.diffusion_model.patch_size)
+        except Exception:
+            patch_size = 2
     h_len, w_len = _canvas_token_grid(lat_h, lat_w, patch_size)
     rv = _region_vector(mask, h_len, w_len)
     hardness = max(0.0, min(1.0, float(region_hardness)))
@@ -254,6 +258,10 @@ class NKDKleinReferenceRegion(io.ComfyNode):
         in_bias = math.log(max(float(region_weight), _EPS))
         out_bias = math.log(max(1.0 - float(outside_suppression), _EPS))
 
+        if _is_flux3(model):
+            from .flux3_attn import add_rule
+            return io.NodeOutput(add_rule(model, reference_index, None, 1.0,
+                                          region_vec, in_bias, out_bias), latent)
         m = model.clone()
         m.set_model_attn1_patch(
             _make_region_patch(int(reference_index), region_vec, in_bias, out_bias)
@@ -354,6 +362,10 @@ class NKDKleinReferenceControl(io.ComfyNode):
                 in_bias = math.log(max(float(region_weight), _EPS))
                 out_bias = math.log(max(1.0 - float(outside_suppression), _EPS))
 
+        if _is_flux3(model):
+            from .flux3_attn import add_rule
+            return io.NodeOutput(add_rule(model, reference_index, schedule, weight,
+                                          region_vec, in_bias, out_bias), latent)
         m = model.clone()
         m.set_model_attn1_patch(
             _make_control_patch(int(reference_index), schedule, weight,

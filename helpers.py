@@ -468,50 +468,33 @@ def _grow_bbox_to_aspect(
     img_w: int, img_h: int,
     multiple: int = _VAE_MULTIPLE,
 ) -> Tuple[int, int, int, int]:
-    """Grow the bbox so its aspect ratio matches `target_aspect` while staying
-    /multiple-aligned, centred on the original bbox, clamped to image bounds.
+    """Grow the bbox toward `target_aspect` while staying /multiple-aligned, centred
+    on the original bbox, clamped to image bounds.
 
-    If the requested grow would exceed the image on the growing axis, we cap
-    that axis to the image size and SHRINK the other axis instead so the final
-    bbox still matches target_aspect AND fits inside the image. The bbox might
-    end up smaller than the original mask region in that case — preferable to
-    returning an out-of-bounds bbox that would crash in _uncrop."""
+    The result ALWAYS contains the input bbox: it only grows, never shrinks. If the
+    image is too small on the growing axis to reach `target_aspect`, the box grows
+    as far as it can and the aspect is simply not met; the caller then takes the
+    render dims from the final box. Shrinking the other axis to force the aspect
+    used to leave part of the mask outside the box (e.g. a mask spanning an image
+    width that is not a multiple of 16), so that part was never regenerated."""
     cur_w = x2 - x1
     cur_h = y2 - y1
     cur_aspect = cur_w / cur_h
 
-    # Cap the maximum bbox dimensions to the image (snapped down to /multiple
-    # so we stay aligned).
-    max_w = (img_w // multiple) * multiple
-    max_h = (img_h // multiple) * multiple
+    # Never below the box we were given (it may span a non-/multiple image edge to edge).
+    max_w = max(cur_w, (img_w // multiple) * multiple)
+    max_h = max(cur_h, (img_h // multiple) * multiple)
 
     if cur_aspect < target_aspect:
-        # bbox too tall → try to widen first
+        # bbox too tall → widen
         new_w_ideal = cur_h * target_aspect
-        new_w = max(cur_w, int((new_w_ideal + multiple - 1) // multiple) * multiple)
+        new_w = max(cur_w, min(max_w, int((new_w_ideal + multiple - 1) // multiple) * multiple))
         new_h = cur_h
-        if new_w > max_w:
-            # Image isn't wide enough — cap width and shrink height to match aspect.
-            new_w = max_w
-            new_h = max(multiple, int(new_w / target_aspect / multiple) * multiple)
-            if new_h > max_h:
-                new_h = max_h
-                new_w = max(multiple, int(new_h * target_aspect / multiple) * multiple)
     else:
-        # bbox too wide → try to grow taller first
+        # bbox too wide → grow taller
         new_h_ideal = cur_w / target_aspect
-        new_h = max(cur_h, int((new_h_ideal + multiple - 1) // multiple) * multiple)
+        new_h = max(cur_h, min(max_h, int((new_h_ideal + multiple - 1) // multiple) * multiple))
         new_w = cur_w
-        if new_h > max_h:
-            new_h = max_h
-            new_w = max(multiple, int(new_h * target_aspect / multiple) * multiple)
-            if new_w > max_w:
-                new_w = max_w
-                new_h = max(multiple, int(new_w / target_aspect / multiple) * multiple)
-
-    # Final safety clamp (should never trigger after the logic above).
-    new_w = min(new_w, max_w)
-    new_h = min(new_h, max_h)
 
     # Placement: only the SIZE needs grid alignment (the VAE cares about the
     # crop dimensions, not its offset). Free offsets let the box hug the image
@@ -685,6 +668,17 @@ def _apply_reference_latent(conditioning: list, ref_latent: torch.Tensor) -> lis
         {"reference_latents": [ref_latent]},
         append=True,
     )
+
+
+def _is_flux3(model) -> bool:
+    """True when `model` (a ModelPatcher) is FLUX.3 Klein.
+
+    Flux3 has no ref_index_scale and no "offset"/"index" reference methods: its
+    references live on their own RoPE axis, so the Flux2-only levers don't apply."""
+    try:
+        return model.model.model_config.unet_config.get("image_model") == "flux3"
+    except Exception:
+        return False
 
 
 def _set_reference_method(conditioning: list, method: str = "index") -> list:
