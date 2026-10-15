@@ -61,7 +61,7 @@ Assembles a prompt from your own text plus curated preset dropdowns, with a live
 
 ### 😺NKD Klein Box Prompt *(optional, Klein 3)*
 
-Places, moves or removes things by **bounding box**. Write a caption, then one line per element, and the node adds the layout list that Klein 3 reads; connect it to Presampling's positive input. (Presampling can also let you draw the boxes instead: see below.) Boxes are `[top, left, bottom, right]` on a 0–1000 grid and guide placement and size — they are not a hard mask.
+Places, moves or removes things by **bounding box**. Write a caption, then one line per element, and the node adds the layout list that Klein 3 reads; connect it to Presampling's positive input. (Presampling can also let you draw the boxes instead: see below.) Boxes are `[top, left, bottom, right]` on a 0–1000 grid and guide placement and size. They are not a hard mask.
 
 ```
 apple_1 from 1: A glossy red apple. | [158,140,908,860] -> [300,380,700,720]
