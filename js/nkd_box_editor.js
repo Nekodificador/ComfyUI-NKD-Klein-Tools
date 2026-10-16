@@ -9,7 +9,7 @@
 import { api } from "../../scripts/api.js";
 import { openNkdModal, nkdButton, nkdSelect } from "./nkd_modal.js";
 
-const HINT = "drag on empty space to add a box · drag a box to move · handles resize · Del removes";
+const HINT = "drag on empty space (or Shift-drag anywhere) to add a box · drag a box to move · click again to pick the box underneath · handles resize · Del removes";
 const MIN_SIZE = 8;      // smaller drags are treated as a click, not a box
 const HANDLE = 7;        // px
 
@@ -340,32 +340,35 @@ export function attachBoxEditor(node) {
             if (!k || !cur[k]) return null;
             return handlePts(cur[k]).find((h) => Math.abs(h.x - px) <= HANDLE && Math.abs(h.y - py) <= HANDLE) || null;
         };
-        const hitBox = (px, py) => {
-            const order = els.map((_, i) => i).reverse();
-            if (sel >= 0) order.unshift(sel);                                  // selected wins ties
-            for (const i of order) {
+        const hitBoxes = (px, py) => {                                         // every box under the cursor, topmost first
+            const out = [];
+            for (let i = els.length - 1; i >= 0; i--) {
                 const k = slotKey(els[i]);
                 const b = k && els[i][k];
                 if (!b) continue;
                 const p = boxPx(b);
-                if (px >= p.x && px <= p.x + p.w && py >= p.y && py <= p.y + p.h) return i;
+                if (px >= p.x && px <= p.x + p.w && py >= p.y && py <= p.y + p.h) out.push(i);
             }
-            return -1;
+            return out;
         };
         canvas.addEventListener("pointerdown", (e) => {
             if (e.button !== 0) return;
             canvas.setPointerCapture(e.pointerId);
             const [px, py] = local(e);
-            const h = hitHandle(px, py);
-            if (h) {
+            const h = e.shiftKey ? null : hitHandle(px, py);
+            if (e.shiftKey) {
+                drag = { mode: "draw", x0: gx(px), y0: gy(py), box: null };    // Shift: draw even over other boxes
+            } else if (h) {
                 const k = slotKey(els[sel]);
                 drag = { mode: "resize", h, k, start: els[sel][k].slice() };
             } else {
-                const i = hitBox(px, py);
+                const cands = hitBoxes(px, py);
+                const wasSel = cands.includes(sel);
+                const i = cands.includes(sel) ? sel : (cands[0] ?? -1);        // keep the selected one so it can be dragged
                 if (i >= 0) {
                     sel = i;
                     const k = slotKey(els[i]);
-                    drag = { mode: "move", k, start: els[i][k].slice(), gx: gx(px), gy: gy(py) };
+                    drag = { mode: "move", k, cands, wasSel, px0: px, py0: py, moved: false, start: els[i][k].slice(), gx: gx(px), gy: gy(py) };
                     styleCards();
                 } else {
                     drag = { mode: "draw", x0: gx(px), y0: gy(py), box: null };
@@ -379,6 +382,8 @@ export function attachBoxEditor(node) {
             if (drag.mode === "draw") {
                 drag.box = [Math.min(drag.y0, y), Math.min(drag.x0, x), Math.max(drag.y0, y), Math.max(drag.x0, x)];
             } else if (drag.mode === "move") {
+                if (!drag.moved && Math.hypot(px - drag.px0, py - drag.py0) < 4) return;   // a click, not a drag
+                drag.moved = true;
                 const [t, l, b, r] = drag.start, dx = x - drag.gx, dy = y - drag.gy;
                 const ddx = clamp(dx, -l, 1000 - r), ddy = clamp(dy, -t, 1000 - b);
                 els[sel][drag.k] = [t + ddy, l + ddx, b + ddy, r + ddx];
@@ -397,6 +402,10 @@ export function attachBoxEditor(node) {
             if (drag.mode === "draw" && drag.box) {
                 const [t, l, b, r] = drag.box;
                 if (b - t >= MIN_SIZE && r - l >= MIN_SIZE) placeDrawn(drag.box);
+            }
+            if (drag.mode === "move" && !drag.moved && drag.wasSel && drag.cands.length > 1) {   // click on stacked boxes: next one down
+                sel = drag.cands[(drag.cands.indexOf(sel) + 1) % drag.cands.length];
+                styleCards();
             }
             drag = null;
             commit(); renderTabs(); renderList(); draw();
