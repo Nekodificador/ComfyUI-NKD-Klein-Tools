@@ -17,7 +17,7 @@ https://github.com/user-attachments/assets/f84cc919-325d-465b-8d3d-e178de5f7872
 - Detail a small area at high quality. Turn on detailing to zoom into the masked zone (a face, a hand, an eye) and regenerate it with far more detail than a full-image pass gives you.
 - Combine several reference images. Extra slots appear as you connect them.
 - Dial each reference separately, or *(experimental)* send one to a specific area of the canvas.
-- With Klein 3, place, move or remove things by drawing boxes right on your images.
+- With Klein 3, place, move, keep, remove or change things by drawing boxes right on your images, or let a detector (SAM3, YOLO…) find them so a workflow runs with nobody drawing. [How boxes work](docs/nodes.md#how-boxes-work-klein-3).
 
 The node figures out which mode you're using based on what you connect, so there's no setting to flip.
 
@@ -35,6 +35,7 @@ The node figures out which mode you're using based on what you connect, so there
 | [😺NKD Klein Reference Fit](docs/nodes.md#nkd-klein-reference-fit) | Scales a reference so it sits inside the masked zone instead of stretching across the whole canvas. *optional, experimental* |
 | [😺NKD Klein Prompt Builder](docs/nodes.md#nkd-klein-prompt-builder) | Builds a prompt from your own text plus curated preset dropdowns, with a live preview. *optional* |
 | [😺NKD Klein Box Prompt](docs/nodes.md#nkd-klein-box-prompt-optional-klein-3) | Places, moves or removes things by bounding box (Klein 3). *optional* |
+| [😺NKD Klein Box Detections](docs/nodes.md#nkd-klein-box-detections-optional-klein-3) | Turns boxes from a detector (SAM3, YOLO…) into elements to remove or keep, with no drawing (Klein 3). *optional* |
 
 **The chain looks like this:**
 

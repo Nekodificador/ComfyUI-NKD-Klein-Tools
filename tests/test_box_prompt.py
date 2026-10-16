@@ -9,7 +9,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from box_prompt import (  # noqa: E402
-    build_box_prompt, build_from_state, crop_rows, parse_rows, rows_from_state, rows_to_lines,
+    build_box_prompt, build_from_state, crop_rows, detection_elements, merge_elements, parse_rows,
+    rows_from_state, rows_to_lines,
 )
 
 
@@ -170,6 +171,42 @@ def test_build_from_state_applies_the_crop():
     assert _json_of(prompt)[0]["bbox"] == [0, 0, 500, 500]
     assert build_from_state("C.", {"elements": [_el(id="o_1", tgt=[800, 800, 900, 900])]},
                             crop=(1000, 1000, (0, 0, 500, 500))) == "C."      # everything dropped
+
+
+def test_caption_gets_the_untagged_ids():
+    p = build_box_prompt("Snowy forest.", "dog_1 from 0: brown dog | [0,0,500,500] -> remove\n"
+                                          "tree_1 from 0: pine | [0,500,900,900] -> keep")
+    cap = p[:p.index("[")]
+    assert cap.startswith("Snowy forest. In <ref_image_0>, remove the brown dog <dog_1> completely")
+    assert "Keep the pine <tree_1> unchanged." in cap and "Keep everything else" in cap
+    tagged = build_box_prompt("A runner <silhouette_1>.", "silhouette_1: shape | [1,1,9,9]")
+    assert tagged.startswith("A runner <silhouette_1>. [")                    # already tagged: untouched
+
+
+def test_sourceless_element_uses_desc_as_written():
+    p = build_box_prompt("", "person_1: Change the jacket to blue. | -> [378,542,492,734]")
+    assert p.startswith("In <ref_image_0>, change the jacket to blue <person_1>.")
+
+
+def test_detection_elements_normalizes_and_numbers():
+    dets = [(0, 0, 50, 100, "person", 0.4), (100, 50, 200, 100, "person", 0.9), (0, 0, 10, 10, "cat", 0.2)]
+    els = detection_elements(dets, 200, 100, "remove", min_score=0.3)
+    assert [e["id"] for e in els] == ["person_1", "person_2"]                 # best score first, cat filtered
+    assert els[0]["src"] == [500, 500, 1000, 1000] and els[0]["tgt"] is None and els[0]["ref"] == 0
+    assert els[1]["src"] == [0, 0, 1000, 250]
+    new = detection_elements([(0, 0, 100, 100, None, None)], 100, 100, "new", desc="Red apple")
+    assert new[0] == {"id": "red_apple_1", "kind": "new", "ref": None, "desc": "Red apple",
+                      "src": None, "tgt": [0, 0, 1000, 1000]}
+    assert len(detection_elements(dets, 200, 100, "keep", max_boxes=1)) == 1
+    rows = rows_from_state({"elements": els})                                 # valid editor state
+    assert rows[0]["tgt"] is None
+
+
+def test_merge_renumbers_collisions():
+    editor = {"elements": [_el(id="face_1", kind="keep", ref=0, src=[0, 0, 9, 9])]}
+    det = {"elements": detection_elements([(0, 0, 5, 5, "face", 1.0)], 10, 10, "remove")}
+    merged = merge_elements(json.dumps(editor), det, "")
+    assert [e["id"] for e in merged["elements"]] == ["face_1", "face_2"]
 
 
 if __name__ == "__main__":

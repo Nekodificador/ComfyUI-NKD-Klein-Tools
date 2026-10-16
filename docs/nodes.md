@@ -6,6 +6,19 @@ The starting point. You connect your model, prompts, and reference image here. I
 
 **Model** (the first setting) tells the node which Klein you use, so it only shows what applies: *Reference Strength* for Klein 2, and **✎ Draw boxes** for Klein 3.
 
+### How boxes work (Klein 3)
+
+Each box element answers two questions: where does it come from, and what happens to it.
+
+- With **no source**, the node puts what the description says at that box. That can be something new, or a change to what is already there: Black Forest Labs' own recolor examples work this way ("Change the jacket to blue.").
+- **Move** takes it from its box on a reference and puts it at the Target box.
+- **Keep** holds it where it is while the rest of the image changes. It's also how you tag something your caption only mentions, like the rock someone is standing on.
+- **Remove** erases it.
+
+Your positive prompt is the caption. Tag each element as `<id>` next to what it is, and images as `<ref_image_0>`, `<ref_image_1>`… counting from 0. If you leave an element untagged, the node adds a sentence for it in the form Klein 3 follows best ("In `<ref_image_0>`, remove the dog `<dog_1>` completely… Keep everything else in the image exactly unchanged."). Your own words still work better, above all for removals, where saying what fills the gap helps.
+
+You can make elements three ways, and they all end up in the same list: draw them in the editor below, write them as lines in [Box Prompt](#nkd-klein-box-prompt-optional-klein-3), or build them from a detector with [Box Detections](#nkd-klein-box-detections-optional-klein-3). Box Detections and the editor can be used together.
+
 ### Drawing boxes (Klein 3)
 
 Choose *Klein 3* and click **✎ Draw boxes** to place, move or remove things by drawing on your images. It uses the reference images you already connected to Presampling, so there is nothing else to wire. Your prompt stays your caption; the boxes are added to the end of it.
@@ -72,6 +85,25 @@ sky_1: A pale sky. | [0,0,400,1000]
 ```
 
 `from N` is the reference number (0 = ref_0). `-> remove` deletes the element, `-> keep` pins it in place, and a line with only a box places something new. In the caption, tag elements with `<id>` and refer to references as `<ref_image_0>`, `<ref_image_1>`… (counting from 0, like `from N`); see [Referring to your images in the prompt](inputs.md#referring-to-your-images-in-the-prompt).
+
+
+### 😺NKD Klein Box Detections *(optional, Klein 3)*
+
+Uses boxes found by a **detector** instead of drawn ones, so a workflow can remove or keep things with nobody in the loop. Connect the boxes from SAM3, RT-DETR or any node with a `BOUNDING_BOX` output (plus the `image` they were found on), or the `SEGS` from an Impact Pack detector (Ultralytics / YOLO). Pick one **action** for all of them:
+
+- *remove* erases what was detected.
+- *keep* holds it in place while the rest of the image changes.
+- *new* has no source: `desc` is either new content for that spot or an instruction for what is already there ("Change the jacket to blue."). Use it to recolor or restyle what the detector found.
+
+They work like the actions in the editor; see [How boxes work](#how-boxes-work-klein-3).
+
+`reference` says which image the boxes were found on (0 = ref_0). `desc` says what they contain; leave it empty to use the detector's label. Elements are named from it (`dog_1`, `dog_2`…). `min_score` and `max_boxes` drop weak detections.
+
+Chain one node per detection, each with its own action (for example: remove every *dog*, keep the *person*), and connect the last one to Presampling's **boxes** input. They join the boxes drawn in the editor and follow the same rules, the detailing zoom included.
+
+Run the detector on the same image you give Presampling, at its original size; boxes are measured on that image. For *keep* and *remove*, the canvas should have ref_0's shape (Aspect Ratio *As Reference*, or *Resize* off).
+
+**The caption.** Any element whose `<id>` your positive prompt doesn't mention gets a sentence added for it ("In `<ref_image_0>`, remove the dog `<dog_1>` completely… Keep everything else in the image exactly unchanged."). This works most of the time, but saying what should fill the gap works better: "In `<ref_image_0>`, remove the dog `<dog_1>` and fill its place with empty sand." Once you mention an `<id>` yourself, nothing is added for it.
 
 ---
 

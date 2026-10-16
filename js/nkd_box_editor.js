@@ -19,6 +19,13 @@ const KINDS = [
     { value: "keep", label: "Keep in place" },
     { value: "remove", label: "Remove" },
 ];
+// One line under the card's selects saying what the chosen action does.
+const KIND_HELP = {
+    new: "Puts what you describe at this box, or changes what is already there (\"Change the jacket to blue\").",
+    move: "Takes it from its box on the reference and puts it at the Target box.",
+    keep: "Holds it where it is while the rest changes. Also the way to name something your caption talks about.",
+    remove: "Erases it. Saying in the caption what fills the gap (\"empty sand\") helps.",
+};
 const color = (i, a = 1) => `hsla(${(i * 137.5 + 300) % 360}, 80%, 62%, ${a})`;
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const ready = (im) => im?.complete && im.naturalWidth > 0;
@@ -541,13 +548,16 @@ export function attachBoxEditor(node) {
                 if (el.ref != null) {
                     row2.appendChild(nkdSelect(KINDS, el.kind, (v) => { el.kind = v; commit(); renderTabs(); renderList(); draw(); }));
                 }
-                const desc = Object.assign(document.createElement("textarea"), { value: el.desc, rows: 2, placeholder: "Describe it (material, colour, pose…)" });
+                const help = Object.assign(document.createElement("div"), { textContent: KIND_HELP[el.kind] || "" });
+                help.style.cssText = "font-size:11px;color:rgba(255,255,255,0.45);line-height:1.35;";
+                const desc = Object.assign(document.createElement("textarea"), { value: el.desc, rows: 2,
+                    placeholder: el.ref == null ? "What goes here, or what to change" : "Describe it (material, colour, pose…)" });
                 desc.style.cssText = "resize:vertical;background:#252830;border:1px solid #3a3d46;border-radius:4px;color:#c8d0e0;padding:4px 6px;font:12px system-ui;";
                 desc.oninput = () => { el.desc = desc.value; commit(); };
                 // The tags to type in the caption: the element's own id and its reference (counted from 0).
                 const tagsLine = document.createElement("div");
                 tagsLine.style.cssText = "font-size:11px;color:rgba(255,255,255,0.35);";
-                const refreshTags = () => { tagsLine.textContent = `Caption tags: <${el.id || "id"}>` + (el.ref != null ? ` · <ref_image_${el.ref}>` : ""); };
+                const refreshTags = () => { tagsLine.textContent = `Caption tags: <${el.id || "id"}>` + (el.ref != null ? ` · <ref_image_${el.ref}>` : "") + " (added for you if the caption skips them)"; };
                 refreshTags();
                 idIn.addEventListener("input", refreshTags);
                 const st = document.createElement("div");
@@ -568,7 +578,7 @@ export function attachBoxEditor(node) {
                 foot.style.cssText = "display:flex;flex-direction:column;gap:4px;";
                 foot.append(st, links);
                 statusEls.push({ el, node: st, jumps });
-                card.append(row, row2, desc, tagsLine, foot);
+                card.append(row, row2, help, desc, tagsLine, foot);
                 list.appendChild(card);
             });
             refreshStatus();

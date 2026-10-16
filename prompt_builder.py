@@ -10,7 +10,8 @@ the live-preview JS.
 from __future__ import annotations
 from comfy_api.latest import io
 
-from .box_prompt import build_box_prompt
+from .box_prompt import build_box_prompt, detection_elements, merge_elements
+from .klein_types import NKDKleinBoxesType
 from .prompt_assembly import SKIP, assemble_prompt, load_presets, options_for
 
 _PRESETS = load_presets()
@@ -142,7 +143,8 @@ class NKDKleinBoxPrompt(io.ComfyNode):
                         "A full scene caption. Tag each element with <id> in the "
                         "text. For edits, refer to references as <ref_image_0>, "
                         "<ref_image_1>… counting from 0, the same number as "
-                        "'from N' below."
+                        "'from N' below. Any element you don't tag gets a sentence "
+                        "added for it, but your own words work better."
                     )),
                 io.String.Input(
                     "elements", multiline=True, default="", display_name="Elements",
@@ -152,7 +154,9 @@ class NKDKleinBoxPrompt(io.ComfyNode):
                         "id from 1: desc | [src] -> [tgt]   — move (from = reference number)\n"
                         "id from 0: desc | [src] -> remove   — remove\n"
                         "id from 0: desc | [src] -> keep   — keep in place\n"
-                        "id: desc | -> [tgt]   — add new content while editing\n"
+                        "id: desc | -> [tgt]   — no source: add something there, or change "
+                        "what is there (desc: 'Change the jacket to blue')\n"
+                        "To only name something the caption talks about, keep it.\n"
                         "Lines starting with # are ignored."
                     )),
             ],
@@ -162,3 +166,82 @@ class NKDKleinBoxPrompt(io.ComfyNode):
     @classmethod
     def execute(cls, caption: str = "", elements: str = "") -> io.NodeOutput:
         return io.NodeOutput(build_box_prompt(caption, elements))
+
+
+def _from_bounding_box(bboxes) -> list[tuple]:
+    """Native BOUNDING_BOX (SAM3, RT-DETR…): a dict, a list, or one list per frame. First frame."""
+    if isinstance(bboxes, dict):
+        bboxes = [bboxes]
+    if bboxes and isinstance(bboxes[0], list):
+        bboxes = bboxes[0]
+    return [(d["x"], d["y"], d["x"] + d["width"], d["y"] + d["height"], d.get("label"), d.get("score"))
+            for d in bboxes or []]
+
+
+def _from_segs(segs) -> tuple[list[tuple], int, int]:
+    """Impact Pack SEGS (Ultralytics detectors): ((h, w), [SEG]) with SEG.bbox = [x1, y1, x2, y2]."""
+    (h, w), items = segs
+    return [(*map(float, s.bbox), s.label, float(s.confidence) if s.confidence is not None else None)
+            for s in items], w, h
+
+
+class NKDKleinBoxDetections(io.ComfyNode):
+    @classmethod
+    def define_schema(cls) -> io.Schema:
+        return io.Schema(
+            node_id="NKDKleinBoxDetections",
+            display_name="😺NKD Klein Box Detections",
+            category="😺NKD Nodes/Klein",
+            description=(
+                "FLUX.3 Klein only — turns detected boxes (SAM3, RT-DETR, Ultralytics "
+                "SEGS…) into box elements with one action: remove them, keep them in "
+                "place, or use them as places for new content. Chain several nodes, one "
+                "per detection, and wire the last one into Presampling's boxes input."
+            ),
+            inputs=[
+                NKDKleinBoxesType.Input("boxes", optional=True,
+                    tooltip="Elements from a previous Box Detections node, to chain several detections."),
+                io.BoundingBox.Input("bboxes", optional=True, force_input=True,
+                    tooltip="Boxes from SAM3, RT-DETR or another node with a BOUNDING_BOX output."),
+                io.Custom("SEGS").Input("segs", optional=True,
+                    tooltip="SEGS from an Impact Pack detector (Ultralytics / YOLO)."),
+                io.Image.Input("image", optional=True,
+                    tooltip="The image the boxes were detected on. Needed for bboxes "
+                            "(SEGS carry their own size). Detect on the same image you "
+                            "feed to Presampling, at its original size."),
+                io.Combo.Input("action", options=["remove", "keep", "new"], default="remove",
+                    tooltip="remove: erase what was detected. keep: hold it in place while "
+                            "the rest changes. new: no source — desc is new content for that "
+                            "spot, or an instruction for what is there (\"Change the jacket "
+                            "to blue\")."),
+                io.Int.Input("reference", default=0, min=0, max=7,
+                    tooltip="Which reference the boxes were detected on (ref_0 = 0). Ignored for new."),
+                io.String.Input("desc", default="",
+                    tooltip="What the boxes contain. Empty: the detector's label, if it gives one."),
+                io.String.Input("id", default="",
+                    tooltip="Name for the elements (dog → dog_1, dog_2…). Empty: taken from the description."),
+                io.Float.Input("min_score", default=0.0, min=0.0, max=1.0, step=0.01,
+                    tooltip="Skip detections below this confidence."),
+                io.Int.Input("max_boxes", default=0, min=0, max=64,
+                    tooltip="Keep only the most confident N boxes. 0 = all."),
+            ],
+            outputs=[NKDKleinBoxesType.Output(display_name="boxes")],
+        )
+
+    @classmethod
+    def execute(cls, action: str, reference: int, desc: str, id: str, min_score: float,
+                max_boxes: int, boxes=None, bboxes=None, segs=None, image=None) -> io.NodeOutput:
+        dets = []
+        if segs is not None:
+            d, w, h = _from_segs(segs)
+            dets.append((d, w, h))
+        if bboxes is not None:
+            if image is None:
+                raise ValueError("Box Detections: connect the image the bboxes were detected on")
+            dets.append((_from_bounding_box(bboxes), image.shape[2], image.shape[1]))
+        prev = merge_elements(boxes)
+        taken = {e["id"] for e in prev["elements"]}
+        new = []
+        for d, w, h in dets:
+            new += detection_elements(d, w, h, action, reference, desc, id, min_score, max_boxes, taken)
+        return io.NodeOutput({"elements": prev["elements"] + new})

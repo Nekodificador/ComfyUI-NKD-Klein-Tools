@@ -1,5 +1,10 @@
 # Changelog
 
+## What's new in 1.13.x
+
+- **New node: 😺NKD Klein Box Detections** *(Klein 3)*. Remove or keep things found by a detector (SAM3, RT-DETR, Ultralytics / YOLO through Impact Pack) with no drawing, so workflows can run on their own. Chain one per detection, each with its own action, into Presampling's new **boxes** input. See [the nodes](nodes.md#nkd-klein-box-detections-optional-klein-3).
+- **Boxes: the caption tags itself.** When your prompt doesn't mention an element's `<id>`, a sentence for it is added in the form Klein 3 follows best. Applies to the box editor and Box Prompt too; elements you already tag are left alone.
+
 ## What's new in 1.12.x
 
 - **Fix: overlapping boxes in the box editor.** You can now draw a box on top of other boxes by holding Shift, and clicking an already selected box again picks the one underneath. A tiny mouse jitter no longer moves a box.

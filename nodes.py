@@ -3,8 +3,8 @@ from typing import Optional
 import logging
 import torch
 from comfy_api.latest import io
-from .box_prompt import build_from_state
-from .klein_types import KleinBundle, NKDKleinBundleType
+from .box_prompt import build_from_state, merge_elements
+from .klein_types import KleinBundle, NKDKleinBundleType, NKDKleinBoxesType
 from .helpers import (
     _HAS_CV2,
     REF_INDEX_SCALE_MAP,
@@ -64,7 +64,9 @@ class NKDKleinPresampling(io.ComfyNode):
                     tooltip=(
                         "Describe what you want in the image. To use a reference, say "
                         "what you want from it and which image it is: \"the red apple "
-                        "from the second image\" (the first image is ref_0)."
+                        "from the second image\" (the first image is ref_0). With Klein 3 "
+                        "boxes, this is the caption: tag elements as <id> and images as "
+                        "<ref_image_0>…; untagged elements get a sentence added."
                     )),
                 io.String.Input("negative", default="", multiline=True,
                     tooltip="Describe what you don't want."),
@@ -205,6 +207,12 @@ class NKDKleinPresampling(io.ComfyNode):
                         "regenerate. White areas get redone, black areas stay the "
                         "same. Connecting a mask switches the node into inpainting mode."
                     )),
+                NKDKleinBoxesType.Input("boxes", optional=True,
+                    tooltip=(
+                        "Klein 3 only. Box elements from Box Detections nodes. They are "
+                        "added to the boxes drawn in the editor and follow the same rules "
+                        "(detailing crop included)."
+                    )),
 
                 io.Int.Input("mask_expand", default=20, min=0, max=512,
                     tooltip=(
@@ -284,6 +292,7 @@ class NKDKleinPresampling(io.ComfyNode):
         slide: float,
         ref_images: io.Autogrow.Type,
         mask: Optional[torch.Tensor] = None,
+        boxes: Optional[dict] = None,
         mask_expand: int = 20,
         mask_blur: int = 10,
         inpaint_blend: float = 1.0,
@@ -415,14 +424,15 @@ class NKDKleinPresampling(io.ComfyNode):
             )
             orig_size = (native_h, native_w)
 
-        # 5b. Encode the prompts. Klein 3: the boxes drawn in the editor go at the end of the
-        # prompt; with detailing they are first mapped into the zoomed area, since the
-        # model only sees that crop of ref_0.
-        if boxes_json.strip():
+        # 5b. Encode the prompts. Klein 3: the boxes drawn in the editor, plus any wired in
+        # from Box Detections, go at the end of the prompt; with detailing they are first
+        # mapped into the zoomed area, since the model only sees that crop of ref_0.
+        box_state = merge_elements(boxes_json, boxes)
+        if box_state["elements"]:
             if _is_flux3(model):
                 crop = (ref_0.shape[2], ref_0.shape[1], crop_box) if crop_box is not None else None
                 gone: list = []
-                positive = build_from_state(positive, boxes_json, crop=crop, dropped=gone)
+                positive = build_from_state(positive, box_state, crop=crop, dropped=gone)
                 if gone:
                     logging.getLogger(__name__).warning(
                         "NKD Klein Presampling: boxes outside the detailing area were skipped: %s",

@@ -71,12 +71,39 @@ def parse_rows(text: str) -> list[dict]:
     return rows
 
 
+def _mention(r: dict, edit: bool) -> str:
+    """A caption sentence for an element the caption doesn't tag yet (BFL: every <id>
+    appears in the caption next to what it is)."""
+    what = f"the {r['desc']} <{r['id']}>" if r["desc"] else f"<{r['id']}>"
+    if not edit:
+        return f"{r['desc']} <{r['id']}>." if r["desc"] else f"<{r['id']}>."
+    if r["ref"] is None:
+        # no source: new content OR an instruction for what is already there (BFL's
+        # recolor examples), so the desc is used as written
+        return f"{r['desc'].rstrip('.')} <{r['id']}>." if r["desc"] else f"<{r['id']}>."
+    if r["tgt"] is None:
+        return f"Remove {what} completely and fill its place with the surrounding background."
+    if r["tgt"] == r["src"]:                               # BFL: src == tgt is an anchor
+        return f"Keep {what} unchanged."
+    return f"Move {what} from <ref_image_{r['ref']}>."
+
+
 def _emit(caption: str, rows: list[dict]) -> str:
     """caption + JSON element list, in BFL's layout or edit shape."""
     caption = (caption or "").rstrip()
     if not rows:
         return caption
     edit = any(r["ref"] is not None or r["has_arrow"] for r in rows)
+    missing = [_mention(r, edit) for r in rows if f"<{r['id']}>" not in caption]
+    if edit and missing:
+        # BFL's edit records name the image first and protect the rest. Measured on a
+        # detected dog: a bare "Remove …" kept it; this form removed it in 2 of 3 seeds,
+        # naming what fills the hole ("empty sand") in 3 of 3 — so a written caption wins
+        if "<ref_image_" not in caption:
+            missing[0] = "In <ref_image_0>, " + missing[0][0].lower() + missing[0][1:]
+        if "everything else" not in caption.lower():
+            missing.append("Keep everything else in the image exactly unchanged.")
+    caption = " ".join([caption] + missing).strip()
     out = []
     for r in rows:
         if edit:
@@ -196,6 +223,72 @@ def crop_rows(rows: list[dict], native_w: int, native_h: int, crop_box) -> tuple
             lost = lost or r["src"] is None
         (dropped if lost else out).append(r["id"] if lost else r)
     return out, dropped
+
+
+# ── Detected boxes (SAM3, RT-DETR, Ultralytics…) → editor-state elements ───────────
+def _id_prefix(text: str) -> str:
+    p = re.sub(r"\W+", "_", (text or "").strip().lower()).strip("_")
+    return p if p and not p[0].isdigit() else ("obj_" + p if p else "obj")
+
+
+def _next_ids(prefix: str, taken: set[str]):
+    """prefix_1, prefix_2… skipping ids already used anywhere in the chain."""
+    n = 1
+    while True:
+        rid = f"{prefix}_{n}"
+        if rid not in taken:
+            taken.add(rid)
+            yield rid
+        n += 1
+
+
+def detection_elements(dets, width: int, height: int, action: str, ref: int = 0, desc: str = "",
+                       id_prefix: str = "", min_score: float = 0.0, max_boxes: int = 0,
+                       taken=None) -> list[dict]:
+    """dets: [(x1, y1, x2, y2, label|None, score|None)] in pixels of the detected image.
+    action keep|remove: element of reference `ref`; new: the box is a place on the canvas.
+    Highest score first; desc falls back to the detector's label, the id prefix to desc."""
+    if action not in ("keep", "remove", "new"):
+        raise ValueError(f"unknown action {action!r}")
+    taken = set() if taken is None else taken
+    w, h = max(1, int(width)), max(1, int(height))
+    dets = [d for d in dets if d[5] is None or d[5] >= min_score]
+    dets.sort(key=lambda d: -(d[5] if d[5] is not None else 1.0))
+    if max_boxes > 0:
+        dets = dets[:max_boxes]
+    ids = {}
+    out = []
+    for x1, y1, x2, y2, label, _score in dets:
+        t, l = round(max(0.0, y1) / h * 1000), round(max(0.0, x1) / w * 1000)
+        b, r = round(min(h, y2) / h * 1000), round(min(w, x2) / w * 1000)
+        if b - t < 1 or r - l < 1:
+            continue
+        d = (desc or label or "").strip()
+        prefix = _id_prefix(id_prefix or d)
+        rid = next(ids.setdefault(prefix, _next_ids(prefix, taken)))
+        box = [t, l, b, r]
+        out.append({"id": rid, "kind": action, "ref": None if action == "new" else int(ref), "desc": d,
+                    "src": None if action == "new" else box, "tgt": box if action == "new" else None})
+    return out
+
+
+def merge_elements(*states) -> dict:
+    """Join editor states / chained detections into one state. A later element whose id is
+    already used gets the next free number, so the chain never collides with the editor."""
+    taken, out = set(), []
+    for st in states:
+        if isinstance(st, str):
+            st = json.loads(st) if st.strip() else {}
+        for el in (st or {}).get("elements") or []:
+            el = dict(el)
+            rid = str(el.get("id", ""))
+            if rid in taken:
+                m = re.match(r"^(.*?)(?:_\d+)?$", rid)
+                el["id"] = next(_next_ids(m[1] or "obj", taken))
+            else:
+                taken.add(rid)
+            out.append(el)
+    return {"elements": out}
 
 
 def build_from_state(caption: str, state, crop=None, dropped=None) -> str:

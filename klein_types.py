@@ -24,3 +24,10 @@ class KleinBundle:
 @comfytype(io_type="NKD_KLEIN_BUNDLE")
 class NKDKleinBundleType(ComfyTypeIO):
     Type = KleinBundle
+
+
+@comfytype(io_type="NKD_KLEIN_BOXES")
+class NKDKleinBoxesType(ComfyTypeIO):
+    """Box elements for FLUX.3 Klein, the same shape as the box editor's state:
+    {"elements": [{"id", "kind", "ref", "desc", "src", "tgt"}]} on the 0..1000 grid."""
+    Type = dict

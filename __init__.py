@@ -2,7 +2,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 from .nodes import NKDKleinPresampling, NKDKleinPostsampling
 from .ref_schedule import NKDKleinReferenceWeight
-from .prompt_builder import NKDKleinPromptBuilder, NKDKleinBoxPrompt
+from .prompt_builder import NKDKleinPromptBuilder, NKDKleinBoxPrompt, NKDKleinBoxDetections
 from .region_schedule import NKDKleinReferenceRegion, NKDKleinReferenceControl
 from .region_fit import NKDKleinReferenceFit
 
@@ -18,6 +18,7 @@ class NKDKleinNodesExtension(ComfyExtension):
             NKDKleinReferenceWeight,
             NKDKleinPromptBuilder,
             NKDKleinBoxPrompt,
+            NKDKleinBoxDetections,
             NKDKleinReferenceRegion,
             NKDKleinReferenceControl,
             NKDKleinReferenceFit,
@@ -35,6 +36,7 @@ NODE_CLASS_MAPPINGS = {
     "NKDKleinReferenceWeight": NKDKleinReferenceWeight,
     "NKDKleinPromptBuilder": NKDKleinPromptBuilder,
     "NKDKleinBoxPrompt": NKDKleinBoxPrompt,
+    "NKDKleinBoxDetections": NKDKleinBoxDetections,
     "NKDKleinReferenceRegion": NKDKleinReferenceRegion,
     "NKDKleinReferenceControl": NKDKleinReferenceControl,
     "NKDKleinReferenceFit": NKDKleinReferenceFit,
@@ -46,6 +48,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NKDKleinReferenceWeight": "😺NKD Klein Reference Weight",
     "NKDKleinPromptBuilder": "😺NKD Klein Prompt Builder",
     "NKDKleinBoxPrompt": "😺NKD Klein Box Prompt",
+    "NKDKleinBoxDetections": "😺NKD Klein Box Detections",
     "NKDKleinReferenceRegion": "😺NKD Klein Reference Region",
     "NKDKleinReferenceControl": "😺NKD Klein Reference Control",
     "NKDKleinReferenceFit": "😺NKD Klein Reference Fit",
