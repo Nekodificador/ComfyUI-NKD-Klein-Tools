@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from box_prompt import (  # noqa: E402
-    build_box_prompt, build_from_state, crop_rows, detection_elements, merge_elements, parse_rows,
+    build_box_prompt, build_from_state, crop_rows, detection_elements, mask_detections, merge_elements, parse_rows, resolve_px,
     rows_from_state, rows_to_lines,
 )
 
@@ -189,22 +189,52 @@ def test_sourceless_element_uses_desc_as_written():
 
 
 def test_detection_elements_normalizes_and_numbers():
-    dets = [(0, 0, 50, 100, "person", 0.4), (100, 50, 200, 100, "person", 0.9), (0, 0, 10, 10, "cat", 0.2)]
-    els = detection_elements(dets, 200, 100, "remove", min_score=0.3)
-    assert [e["id"] for e in els] == ["person_1", "person_2"]                 # best score first, cat filtered
-    assert els[0]["src"] == [500, 500, 1000, 1000] and els[0]["tgt"] is None and els[0]["ref"] == 0
-    assert els[1]["src"] == [0, 0, 1000, 250]
-    new = detection_elements([(0, 0, 100, 100, None, None)], 100, 100, "new", desc="Red apple")
+    dets = [(100, 50, 200, 100, "person"), (0, 0, 50, 100, "person")]
+    els = detection_elements(dets, (200, 100), "remove")
+    assert [e["id"] for e in els] == ["person_1", "person_2"]
+    assert els[0]["src"] == [0, 0, 1000, 250] and els[0]["tgt"] is None and els[0]["ref"] == 0   # leftmost first
+    assert els[1]["src"] == [500, 500, 1000, 1000]
+    new = detection_elements([(0, 0, 100, 100, None)], (100, 100), "new", desc="Red apple")
     assert new[0] == {"id": "red_apple_1", "kind": "new", "ref": None, "desc": "Red apple",
                       "src": None, "tgt": [0, 0, 1000, 1000]}
-    assert len(detection_elements(dets, 200, 100, "keep", max_boxes=1)) == 1
-    rows = rows_from_state({"elements": els})                                 # valid editor state
-    assert rows[0]["tgt"] is None
+    assert rows_from_state({"elements": els})[0]["tgt"] is None             # valid editor state
+
+
+def test_detection_ids_are_class_nouns():
+    lab = detection_elements([(0, 0, 9, 9, "dog")], (10, 10), "remove", desc="the brown dog on the left")
+    assert lab[0]["id"] == "dog_1" and lab[0]["desc"] == "the brown dog on the left"   # label wins for the id
+    instr = detection_elements([(0, 0, 9, 9, None)], (10, 10), "new", desc="Change the jacket to blue")
+    assert instr[0]["id"] == "obj_1"
+    tagged = detection_elements([(50, 0, 60, 9, "dog"), (0, 0, 9, 9, "dog")], (100, 10), "remove", tag="Perro")
+    assert [e["id"] for e in tagged] == ["perro_1", "perro_2"] and tagged[0]["src"][1] == 0   # tag wins, left first
+    more = detection_elements([(0, 0, 9, 9, None)], (10, 10), "keep", tag="perro", taken={"perro_1", "perro_2"})
+    assert more[0]["id"] == "perro_3"                                          # chain keeps counting
+
+
+def test_pixel_boxes_resolved_by_reference_size():
+    els = detection_elements([(0, 0, 50, 100, "dog")], None, "remove", ref=1)
+    assert els[0]["px"] == [0.0, 0.0, 50.0, 100.0] and els[0]["src"] is None
+    out = resolve_px({"elements": els}, [(10, 10), (200, 100)])["elements"]
+    assert out[0]["src"] == [0, 0, 1000, 250] and "px" not in out[0]
+    try:
+        resolve_px({"elements": els}, [(10, 10)])
+        raise AssertionError("expected ValueError")
+    except ValueError as e:
+        assert "ref_1" in str(e)
+
+
+def test_mask_detections_batch_and_blobs():
+    import numpy as np
+    m = np.zeros((1, 100, 200), dtype=np.float32)
+    m[0, 10:20, 10:30] = 1
+    m[0, 50:90, 100:180] = 1
+    assert sorted(mask_detections(m)) == [(10.0, 10.0, 30.0, 20.0, None), (100.0, 50.0, 180.0, 90.0, None)]
+    assert len(mask_detections(np.concatenate([m, m]))) == 2                  # batch: one box per mask
 
 
 def test_merge_renumbers_collisions():
     editor = {"elements": [_el(id="face_1", kind="keep", ref=0, src=[0, 0, 9, 9])]}
-    det = {"elements": detection_elements([(0, 0, 5, 5, "face", 1.0)], 10, 10, "remove")}
+    det = {"elements": detection_elements([(0, 0, 5, 5, "face")], (10, 10), "remove")}
     merged = merge_elements(json.dumps(editor), det, "")
     assert [e["id"] for e in merged["elements"]] == ["face_1", "face_2"]
 

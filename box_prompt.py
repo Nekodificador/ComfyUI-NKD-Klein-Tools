@@ -104,6 +104,12 @@ def _emit(caption: str, rows: list[dict]) -> str:
         if "everything else" not in caption.lower():
             missing.append("Keep everything else in the image exactly unchanged.")
     caption = " ".join([caption] + missing).strip()
+    return f"{caption} {json.dumps(bfl_rows(rows), ensure_ascii=False)}".strip()
+
+
+def bfl_rows(rows: list[dict]) -> list[dict]:
+    """Internal rows -> BFL's element list (layout or edit shape)."""
+    edit = any(r["ref"] is not None or r["has_arrow"] for r in rows)
     out = []
     for r in rows:
         if edit:
@@ -113,7 +119,7 @@ def _emit(caption: str, rows: list[dict]) -> str:
                         "tgt_bbox": r["tgt"], "desc": r["desc"]})
         else:
             out.append({"id": r["id"], "bbox": r["tgt"], "desc": r["desc"]})
-    return f"{caption} {json.dumps(out, ensure_ascii=False)}".strip()
+    return out
 
 
 def build_box_prompt(caption: str, text: str) -> str:
@@ -242,34 +248,86 @@ def _next_ids(prefix: str, taken: set[str]):
         n += 1
 
 
-def detection_elements(dets, width: int, height: int, action: str, ref: int = 0, desc: str = "",
-                       id_prefix: str = "", min_score: float = 0.0, max_boxes: int = 0,
-                       taken=None) -> list[dict]:
-    """dets: [(x1, y1, x2, y2, label|None, score|None)] in pixels of the detected image.
+def _px_box(x1, y1, x2, y2, w, h):
+    """Pixel corners -> [top, left, bottom, right] on the 0..1000 grid, or None if empty."""
+    w, h = max(1, int(w)), max(1, int(h))
+    t, l = round(max(0.0, y1) / h * 1000), round(max(0.0, x1) / w * 1000)
+    b, r = round(min(h, y2) / h * 1000), round(min(w, x2) / w * 1000)
+    return [t, l, b, r] if b - t >= 1 and r - l >= 1 else None
+
+
+def _place(el: dict, box) -> dict:
+    """Put a box where the element's kind wants it: the reference for keep/remove, the canvas for new."""
+    new = el["kind"] == "new"
+    return {**el, "src": None if new else box, "tgt": box if new else None}
+
+
+def detection_elements(dets, size, action: str, ref: int = 0, desc: str = "", taken=None,
+                       tag: str = "") -> list[dict]:
+    """dets: [(x1, y1, x2, y2, label|None)] in pixels of the image they were found on.
     action keep|remove: element of reference `ref`; new: the box is a place on the canvas.
-    Highest score first; desc falls back to the detector's label, the id prefix to desc."""
+    size = (w, h) of that image, or None when the detector doesn't say: the boxes then stay
+    in pixels ("px") and Presampling sizes them with that reference (resolve_px).
+    Ids run left to right, as BFL numbers them, named after `tag` (else the label, a short desc, or obj);
+    desc falls back to the detector's label."""
     if action not in ("keep", "remove", "new"):
         raise ValueError(f"unknown action {action!r}")
     taken = set() if taken is None else taken
-    w, h = max(1, int(width)), max(1, int(height))
-    dets = [d for d in dets if d[5] is None or d[5] >= min_score]
-    dets.sort(key=lambda d: -(d[5] if d[5] is not None else 1.0))
-    if max_boxes > 0:
-        dets = dets[:max_boxes]
-    ids = {}
-    out = []
-    for x1, y1, x2, y2, label, _score in dets:
-        t, l = round(max(0.0, y1) / h * 1000), round(max(0.0, x1) / w * 1000)
-        b, r = round(min(h, y2) / h * 1000), round(min(w, x2) / w * 1000)
-        if b - t < 1 or r - l < 1:
+    ids, out = {}, []
+    for x1, y1, x2, y2, label in sorted(dets, key=lambda d: (d[0], d[1])):
+        box = _px_box(x1, y1, x2, y2, *size) if size else None
+        if size and box is None:
             continue
         d = (desc or label or "").strip()
-        prefix = _id_prefix(id_prefix or d)
+        # the id is a class noun (dog_1): the user's tag, else the detector's label, else a
+        # short desc; an instruction for `new` ("Change the jacket to blue") makes a useless id
+        name = tag.strip() or label or (desc if len(desc.split()) <= 3 else "")
+        prefix = _id_prefix(name)
         rid = next(ids.setdefault(prefix, _next_ids(prefix, taken)))
-        box = [t, l, b, r]
-        out.append({"id": rid, "kind": action, "ref": None if action == "new" else int(ref), "desc": d,
-                    "src": None if action == "new" else box, "tgt": box if action == "new" else None})
+        el = {"id": rid, "kind": action, "ref": None if action == "new" else int(ref), "desc": d}
+        out.append(_place(el, box) if size else {**el, "src": None, "tgt": None,
+                                                 "px": [float(x1), float(y1), float(x2), float(y2)]})
     return out
+
+
+def resolve_px(state: dict, sizes: list) -> dict:
+    """Size the pixel boxes Box Detections couldn't (no image size from the detector) with the
+    reference they belong to; `new` ones are placed by ref_0. sizes = [(w, h)] per reference."""
+    out = []
+    for el in state.get("elements") or []:
+        if "px" in el:
+            i = el["ref"] if el["ref"] is not None else 0
+            if i >= len(sizes):
+                raise ValueError(f"{el['id']}: its boxes come from ref_{i}, but nothing is connected there")
+            box = _px_box(*el["px"], *sizes[i])
+            if box is None:
+                continue
+            el = _place({k: v for k, v in el.items() if k != "px"}, box)
+        out.append(el)
+    return {"elements": out}
+
+
+def mask_detections(mask) -> list[tuple]:
+    """MASK [B,H,W] (numpy) -> pixel boxes. A batch is one object per mask (SAM3 individual
+    masks); a single mask is split into its separate blobs."""
+    import numpy as np
+    m = np.asarray(mask)
+    m = m[None] if m.ndim == 2 else m
+    dets = []
+    if m.shape[0] > 1:
+        for one in m:
+            ys, xs = np.nonzero(one > 0.5)
+            if len(xs):
+                dets.append((float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1), None))
+        return dets
+    import cv2
+    binary = (m[0] > 0.5).astype(np.uint8)
+    n, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    floor = binary.size * 0.001   # ponytail: drops specks under 0.1% of the image; make it a knob if real objects get lost
+    for x, y, w, h, area in stats[1:n]:
+        if area >= floor:
+            dets.append((float(x), float(y), float(x + w), float(y + h), None))
+    return dets
 
 
 def merge_elements(*states) -> dict:
@@ -297,6 +355,12 @@ def build_from_state(caption: str, state, crop=None, dropped=None) -> str:
     `crop` = (native_w, native_h, crop_box) maps the boxes into Presampling's detailing
     area first (see crop_rows); ids dropped because they fall outside it are appended to
     the `dropped` list when one is given."""
+    return _emit(caption, state_rows(state, crop, dropped))
+
+
+def state_rows(state, crop=None, dropped=None) -> list[dict]:
+    """Editor state (dict, JSON string or empty) -> validated rows, mapped into the
+    detailing crop when one is given (see build_from_state)."""
     if isinstance(state, str):
         state = json.loads(state) if state.strip() else {}
     rows = rows_from_state(state)
@@ -304,4 +368,4 @@ def build_from_state(caption: str, state, crop=None, dropped=None) -> str:
         rows, gone = crop_rows(rows, crop[0], crop[1], crop[2])
         if dropped is not None:
             dropped.extend(gone)
-    return _emit(caption, rows)
+    return rows

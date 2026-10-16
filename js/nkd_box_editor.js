@@ -97,13 +97,18 @@ export function attachBoxEditor(node) {
     }
     const slotOf = (ref) => node.inputs?.findIndex((i) => i.name === `ref_images.ref_${ref}`) ?? -1;
     const linkedRef = (ref) => { const s = slotOf(ref); return s >= 0 && node.inputs[s].link != null; };
+    // A node's preview shows its image only when it has a single IMAGE output; one with several
+    // (Freeze Frames: clip 1 in, clip 1 out…) shows them all in one grid, so imgs[0] may be another output.
+    const onePreview = (n) => (n?.outputs || []).filter((o) => o.type === "IMAGE").length <= 1;
     function refImage(ref) {
         const slot = slotOf(ref);
         if (slot < 0 || node.inputs[slot].link == null) return null;
         const up = node.getInputNode?.(slot);
-        if (ready(up?.imgs?.[0])) return up.imgs[0];
-        const file = widgetFile(up);
-        if (ready(file)) return file;
+        if (onePreview(up)) {
+            if (ready(up?.imgs?.[0])) return up.imgs[0];
+            const file = widgetFile(up);
+            if (ready(file)) return file;
+        }
         // What Presampling actually received the last time it ran: exact, and it works for images
         // generated upstream (they have no preview of their own until they run).
         const ran = runRefs[ref];
@@ -115,6 +120,7 @@ export function attachBoxEditor(node) {
             for (const n of frontier) {
                 if (seen.has(n.id)) continue;
                 seen.add(n.id);
+                if (!onePreview(n)) continue;                // can't tell which output it shows
                 if (ready(n.imgs?.[0])) return n.imgs[0];
                 (n.inputs || []).forEach((inp, i) => {
                     if (inp.link != null && inp.type === "IMAGE") { const u = n.getInputNode?.(i); if (u) next.push(u); }
@@ -292,7 +298,10 @@ export function attachBoxEditor(node) {
             if (im) { ctx.globalAlpha = view === "target" ? (fit === "contain" ? 0.5 : 0.7) : 1; drawFit(im, fit); ctx.globalAlpha = 1; }
             else {
                 ctx.fillStyle = "rgba(255,255,255,0.28)"; ctx.font = "12px system-ui"; ctx.textAlign = "center";
-                ctx.fillText(view === "target" ? "Connect an image to ref_0 to see it here" : `Connect an image to ref_${view}`, R.x + R.w / 2, R.y + R.h / 2);
+                const r = view === "target" ? 0 : view;
+                ctx.fillText(linkedRef(r) ? "Run the workflow up to Presampling to see this image here"
+                    : (view === "target" ? "Connect an image to ref_0 to see it here" : `Connect an image to ref_${view}`),
+                    R.x + R.w / 2, R.y + R.h / 2);
                 ctx.textAlign = "start";
             }
             ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 1; ctx.strokeRect(R.x + 0.5, R.y + 0.5, R.w - 1, R.h - 1);

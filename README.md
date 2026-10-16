@@ -17,6 +17,7 @@ https://github.com/user-attachments/assets/f84cc919-325d-465b-8d3d-e178de5f7872
 - Detail a small area at high quality. Turn on detailing to zoom into the masked zone (a face, a hand, an eye) and regenerate it with far more detail than a full-image pass gives you.
 - Combine several reference images. Extra slots appear as you connect them.
 - Dial each reference separately, or *(experimental)* send one to a specific area of the canvas.
+- With Klein 3, connect the prompt upsampler and type a short request: Presampling turns it into the detailed prompt Klein 3 is built for, looking at your references and boxes. [Prompt upsampler](docs/nodes.md#prompt-upsampler-klein-3).
 - With Klein 3, place, move, keep, remove or change things by drawing boxes right on your images, or let a detector (SAM3, YOLO…) find them so a workflow runs with nobody drawing. [How boxes work](docs/nodes.md#how-boxes-work-klein-3).
 
 The node figures out which mode you're using based on what you connect, so there's no setting to flip.
@@ -35,7 +36,7 @@ The node figures out which mode you're using based on what you connect, so there
 | [😺NKD Klein Reference Fit](docs/nodes.md#nkd-klein-reference-fit) | Scales a reference so it sits inside the masked zone instead of stretching across the whole canvas. *optional, experimental* |
 | [😺NKD Klein Prompt Builder](docs/nodes.md#nkd-klein-prompt-builder) | Builds a prompt from your own text plus curated preset dropdowns, with a live preview. *optional* |
 | [😺NKD Klein Box Prompt](docs/nodes.md#nkd-klein-box-prompt-optional-klein-3) | Places, moves or removes things by bounding box (Klein 3). *optional* |
-| [😺NKD Klein Box Detections](docs/nodes.md#nkd-klein-box-detections-optional-klein-3) | Turns boxes from a detector (SAM3, YOLO…) into elements to remove or keep, with no drawing (Klein 3). *optional* |
+| [😺NKD Klein Box Detections](docs/nodes.md#nkd-klein-box-detections-optional-klein-3) | Turns what a detector found (a mask, SAM3 boxes, YOLO…) into things to remove, keep or change, with no drawing (Klein 3). *optional* |
 
 **The chain looks like this:**
 
@@ -84,6 +85,7 @@ Or install via the ComfyUI Manager by searching for **NKD Klein Tools**.
 ### Work this builds on
 
 - [Black Forest Labs](https://docs.bfl.ai/flux_3/flux3_image_bounding_boxes) defines the box format Klein 3 reads, which the box editor and 😺NKD Klein Box Prompt write.
+- The prompt upsampler uses the system prompts Black Forest Labs ships with [FLUX 3 Image Klein Prompt Upsampler](https://huggingface.co/black-forest-labs/flux-3-image-klein-pup) (Apache 2.0), bundled as `upsampler_prompts.json`.
 - [black-forest-labs/skills](https://github.com/black-forest-labs/skills) (MIT) is where the prompt guidance behind 😺NKD Klein Prompt Builder comes from, its presets and its JSON layout.
 - [ComfyUI-Flux2Klein-Enhancer](https://github.com/capitan01R/ComfyUI-Flux2Klein-Enhancer) is where the idea of dialing one reference's strength on its own comes from, which 😺NKD Klein Reference Weight and Reference Control build on.
 - [differential-diffusion](https://github.com/exx8/differential-diffusion) is the soft-mask denoise schedule Presampling applies when you give it a mask, same behavior as core's DifferentialDiffusion node.

@@ -609,6 +609,27 @@ app.registerExtension({
             return;
         }
 
+        // Box Detections: show the tags it made (<dog_1> remove dog…) so the prompt can use them.
+        if (nodeData.name === "NKDKleinBoxDetections") {
+            const origOnCreated = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                origOnCreated?.apply(this, arguments);
+                nkdPbEnsurePreview(this).textContent = "Run the node to see the tags it makes for your prompt.";
+            };
+            const origOnExecuted = nodeType.prototype.onExecuted;
+            nodeType.prototype.onExecuted = function (message) {
+                origOnExecuted?.apply(this, arguments);
+                const text = message?.text;
+                if (text) nkdPbEnsurePreview(this).textContent = Array.isArray(text) ? text.join("\n") : String(text);
+            };
+            const origOnRemoved = nodeType.prototype.onRemoved;
+            nodeType.prototype.onRemoved = function () {
+                this._nkdW?.();
+                origOnRemoved?.apply(this, arguments);
+            };
+            return;
+        }
+
         if (nodeData.name === "NKDKleinReferenceControl") {
             const origOnCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {

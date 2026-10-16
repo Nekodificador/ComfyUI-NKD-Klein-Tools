@@ -3,7 +3,8 @@ from typing import Optional
 import logging
 import torch
 from comfy_api.latest import io
-from .box_prompt import build_from_state, merge_elements
+from .box_prompt import _emit, bfl_rows, merge_elements, resolve_px, state_rows
+from . import upsampler as _ups
 from .klein_types import KleinBundle, NKDKleinBundleType, NKDKleinBoxesType
 from .helpers import (
     _HAS_CV2,
@@ -178,28 +179,6 @@ class NKDKleinPresampling(io.ComfyNode):
                     display_name="Reference Strength"),
 
 
-                # ---- reference images (autogrow) ----
-                io.Autogrow.Input(
-                    "ref_images",
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("img",
-                            optional=True,
-                            tooltip=(
-                                "ref_0 is your main image — the one you want to edit "
-                                "or use as a starting point. Extra slots (ref_1, "
-                                "ref_2…) let you give the model more images to draw "
-                                "inspiration from."
-                            )),
-                        prefix="ref_",
-                        min=1,
-                        max=8,
-                    ),
-                    tooltip=(
-                        "Connect your input image to ref_0. More slots will appear "
-                        "automatically if you want to add extra reference images."
-                    ),
-                ),
-
                 # ---- mask ----
                 io.Mask.Input("mask", optional=True,
                     tooltip=(
@@ -212,6 +191,14 @@ class NKDKleinPresampling(io.ComfyNode):
                         "Klein 3 only. Box elements from Box Detections nodes. They are "
                         "added to the boxes drawn in the editor and follow the same rules "
                         "(detailing crop included)."
+                    )),
+                io.Clip.Input("upsampler", optional=True,
+                    tooltip=(
+                        "Optional. Load FLUX.3 Klein's prompt upsampler (or another "
+                        "instruct LLM) with Load CLIP and connect it here: your short "
+                        "prompt is rewritten into the detailed one Klein works best "
+                        "with. It sees every reference and keeps your boxes exactly "
+                        "where you drew them. See the prompt output for the result."
                     )),
 
                 io.Int.Input("mask_expand", default=20, min=0, max=512,
@@ -250,6 +237,30 @@ class NKDKleinPresampling(io.ComfyNode):
                         "padding focuses tighter on the masked area."
                     ),
                     display_name="Detail Padding"),
+                # ---- reference images (autogrow) ----
+                # Last and optional (the frontend lists required sockets first): the slots it adds
+                # are appended at the bottom, so they must already sit below mask/boxes/upsampler.
+                io.Autogrow.Input(
+                    "ref_images", optional=True,
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Image.Input("img",
+                            optional=True,
+                            tooltip=(
+                                "ref_0 is your main image — the one you want to edit "
+                                "or use as a starting point. Extra slots (ref_1, "
+                                "ref_2…) let you give the model more images to draw "
+                                "inspiration from."
+                            )),
+                        prefix="ref_",
+                        min=1,
+                        max=8,
+                    ),
+                    tooltip=(
+                        "Connect your input image to ref_0. More slots will appear "
+                        "automatically if you want to add extra reference images."
+                    ),
+                ),
+
             ],
             outputs=[
                 io.Model.Output("model"),
@@ -268,6 +279,11 @@ class NKDKleinPresampling(io.ComfyNode):
                         "preprocessing, at the final canvas size. Handy to "
                         "feed into other parts of the workflow that need the "
                         "same prepared image."
+                    )),
+                io.String.Output("prompt", display_name="prompt",
+                    tooltip=(
+                        "The positive prompt exactly as the model reads it: after the "
+                        "upsampler, and with the box list appended."
                     )),
             ],
             # Output node so it can run on its own (up to Presampling) and hand the box editor
@@ -290,9 +306,10 @@ class NKDKleinPresampling(io.ComfyNode):
         image_fit: str,
         outpaint_fill: str,
         slide: float,
-        ref_images: io.Autogrow.Type,
+        ref_images: io.Autogrow.Type = None,
         mask: Optional[torch.Tensor] = None,
         boxes: Optional[dict] = None,
+        upsampler=None,
         mask_expand: int = 20,
         mask_blur: int = 10,
         inpaint_blend: float = 1.0,
@@ -311,7 +328,7 @@ class NKDKleinPresampling(io.ComfyNode):
             from comfy import model_management
             model_management.load_models_gpu([model])
 
-        refs = [v for v in ref_images.values() if v is not None]
+        refs = [v for v in (ref_images or {}).values() if v is not None]
         ref_0 = refs[0] if refs else None
         has_image = ref_0 is not None
         has_mask  = mask is not None and mask.max().item() > 0.0
@@ -428,11 +445,19 @@ class NKDKleinPresampling(io.ComfyNode):
         # from Box Detections, go at the end of the prompt; with detailing they are first
         # mapped into the zoomed area, since the model only sees that crop of ref_0.
         box_state = merge_elements(boxes_json, boxes)
+        px = [e["id"] for e in box_state["elements"] if "px" in e]
+        if px:
+            logging.getLogger(__name__).warning(
+                "NKD Klein Presampling: %s came as pixel boxes with no image size, so they were measured "
+                "against the reference they belong to. If the detector ran on a different-size copy, "
+                "connect its mask to Box Detections instead.", ", ".join(px))
+        box_state = resolve_px(box_state, [(r.shape[2], r.shape[1]) for r in refs])
+        rows: list = []
         if box_state["elements"]:
             if _is_flux3(model):
                 crop = (ref_0.shape[2], ref_0.shape[1], crop_box) if crop_box is not None else None
                 gone: list = []
-                positive = build_from_state(positive, box_state, crop=crop, dropped=gone)
+                rows = state_rows(box_state, crop=crop, dropped=gone)
                 if gone:
                     logging.getLogger(__name__).warning(
                         "NKD Klein Presampling: boxes outside the detailing area were skipped: %s",
@@ -440,6 +465,12 @@ class NKDKleinPresampling(io.ComfyNode):
             else:
                 logging.getLogger(__name__).warning(
                     "NKD Klein Presampling: boxes only work with Klein 3 — ignored.")
+        if upsampler is not None:
+            # The upsampler sees what the model sees: the detailing crop stands in for ref_0.
+            up_refs = ([crop_img if crop_img is not None else ref_0] + refs[1:]) if refs else []
+            positive = _upsample(upsampler, positive, up_refs, bfl_rows(rows) if rows else None, (width, height))
+        elif rows:
+            positive = _emit(positive, rows)
         pos = clip.encode_from_tokens_scheduled(clip.tokenize(positive))
         neg = clip.encode_from_tokens_scheduled(clip.tokenize(negative))
 
@@ -612,7 +643,28 @@ class NKDKleinPresampling(io.ComfyNode):
         # Klein 3: hand the box editor the references as previews (images generated upstream
         # have no preview of their own).
         ui = {"nkd_box_refs": _ref_previews(refs)} if refs and _is_flux3(model) else None
-        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask, ref_0_out, ui=ui)
+        return io.NodeOutput(model, pos, neg, latent, bundle, out_mask, ref_0_out, positive, ui=ui)
+
+
+def _upsample(clip, prompt: str, images: list, locked, canvas) -> str:
+    """Rewrite the prompt with an instruct LLM loaded as a CLIP, in BFL's upsampler format.
+    Locked box rows go in as authoritative and are put back on the answer."""
+    import comfy.utils
+    key, text = _ups.request(prompt, len(images), locked, canvas)
+    imgs = []
+    for im in images:
+        w, h = _ups.reference_size(im.shape[2], im.shape[1], len(images))
+        im = comfy.utils.common_upscale(im[:1, :, :, :3].movedim(-1, 1), w, h, "lanczos", "disabled").movedim(1, -1)
+        imgs.append(im.clamp(0, 1))
+    tokens = clip.tokenize(text, images=imgs, system_prompt=_ups.SYSTEM_PROMPTS[key], thinking=False, min_length=1)
+    ids = clip.generate(tokens, do_sample=False, max_length=_ups.MAX_TOKENS, top_k=20, top_p=0.95,
+                        presence_penalty=_ups.PRESENCE_PENALTY["i2i" if images else "t2i"])
+    answer = _ups.clean_answer(clip.decode(ids))
+    if not answer:
+        raise RuntimeError("NKD Klein Presampling: the upsampler returned an empty prompt")
+    out = _ups.reconcile(answer, locked) if locked else answer
+    logging.getLogger(__name__).info("NKD Klein Presampling: upsampled prompt (%s): %s", key, out)
+    return out
 
 
 def _make_empty_latent(width: int, height: int) -> dict:

@@ -8,9 +8,11 @@ ComfyUI-free `prompt_assembly` module so it can be unit-tested and mirrored by
 the live-preview JS.
 """
 from __future__ import annotations
-from comfy_api.latest import io
+from comfy_api.latest import io, ui
 
-from .box_prompt import build_box_prompt, detection_elements, merge_elements
+import torch
+
+from .box_prompt import build_box_prompt, detection_elements, mask_detections, merge_elements
 from .klein_types import NKDKleinBoxesType
 from .prompt_assembly import SKIP, assemble_prompt, load_presets, options_for
 
@@ -168,21 +170,20 @@ class NKDKleinBoxPrompt(io.ComfyNode):
         return io.NodeOutput(build_box_prompt(caption, elements))
 
 
-def _from_bounding_box(bboxes) -> list[tuple]:
-    """Native BOUNDING_BOX (SAM3, RT-DETR…): a dict, a list, or one list per frame. First frame."""
-    if isinstance(bboxes, dict):
-        bboxes = [bboxes]
-    if bboxes and isinstance(bboxes[0], list):
-        bboxes = bboxes[0]
-    return [(d["x"], d["y"], d["x"] + d["width"], d["y"] + d["height"], d.get("label"), d.get("score"))
-            for d in bboxes or []]
-
-
-def _from_segs(segs) -> tuple[list[tuple], int, int]:
-    """Impact Pack SEGS (Ultralytics detectors): ((h, w), [SEG]) with SEG.bbox = [x1, y1, x2, y2]."""
-    (h, w), items = segs
-    return [(*map(float, s.bbox), s.label, float(s.confidence) if s.confidence is not None else None)
-            for s in items], w, h
+def _detections(value) -> tuple[list[tuple], tuple | None]:
+    """Whatever the detections input carries -> (pixel boxes, (w, h) or None when unknown).
+    MASK: its own size. SEGS (Impact / Ultralytics): ((h, w), [SEG]) with SEG.bbox = [x1, y1, x2, y2].
+    BOUNDING_BOX (SAM3, RT-DETR…): {x, y, width, height}, a list, or one list per frame (first frame);
+    it carries no image size, so Presampling sizes it with the reference."""
+    if isinstance(value, torch.Tensor):
+        return mask_detections(value.detach().float().cpu().numpy()), (value.shape[-1], value.shape[-2])
+    if isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], list):
+        (h, w), items = value
+        return [(*map(float, seg.bbox), seg.label) for seg in items], (w, h)
+    boxes = [value] if isinstance(value, dict) else (value or [])
+    if boxes and isinstance(boxes[0], list):
+        boxes = boxes[0]
+    return [(d["x"], d["y"], d["x"] + d["width"], d["y"] + d["height"], d.get("label")) for d in boxes], None
 
 
 class NKDKleinBoxDetections(io.ComfyNode):
@@ -193,55 +194,51 @@ class NKDKleinBoxDetections(io.ComfyNode):
             display_name="😺NKD Klein Box Detections",
             category="😺NKD Nodes/Klein",
             description=(
-                "FLUX.3 Klein only — turns detected boxes (SAM3, RT-DETR, Ultralytics "
-                "SEGS…) into box elements with one action: remove them, keep them in "
-                "place, or use them as places for new content. Chain several nodes, one "
-                "per detection, and wire the last one into Presampling's boxes input."
+                "FLUX.3 Klein only. Connect what a detector found (a mask, SAM3 / RT-DETR "
+                "boxes, or Ultralytics SEGS) and pick what to do with it: remove it, keep it "
+                "in place, or change it. Chain one node per detection and wire the last one "
+                "into Presampling's boxes input."
             ),
             inputs=[
-                NKDKleinBoxesType.Input("boxes", optional=True,
-                    tooltip="Elements from a previous Box Detections node, to chain several detections."),
-                io.BoundingBox.Input("bboxes", optional=True, force_input=True,
-                    tooltip="Boxes from SAM3, RT-DETR or another node with a BOUNDING_BOX output."),
-                io.Custom("SEGS").Input("segs", optional=True,
-                    tooltip="SEGS from an Impact Pack detector (Ultralytics / YOLO)."),
-                io.Image.Input("image", optional=True,
-                    tooltip="The image the boxes were detected on. Needed for bboxes "
-                            "(SEGS carry their own size). Detect on the same image you "
-                            "feed to Presampling, at its original size."),
+                io.MultiType.Input(
+                    io.Mask.Input("detections"),
+                    types=[io.BoundingBox, io.Custom("SEGS")],
+                    tooltip="What was found: a MASK (SAM3, a segmenter, or one you painted), "
+                            "BOUNDING_BOX from SAM3 / RT-DETR, or SEGS from an Impact Pack "
+                            "detector (Ultralytics / YOLO). Each object becomes one element. "
+                            "BOUNDING_BOX doesn't say how big the image was, so it must come "
+                            "from the same image Presampling gets; if that one is resized, "
+                            "use the detector's mask instead.",
+                ),
                 io.Combo.Input("action", options=["remove", "keep", "new"], default="remove",
-                    tooltip="remove: erase what was detected. keep: hold it in place while "
-                            "the rest changes. new: no source — desc is new content for that "
-                            "spot, or an instruction for what is there (\"Change the jacket "
-                            "to blue\")."),
-                io.Int.Input("reference", default=0, min=0, max=7,
-                    tooltip="Which reference the boxes were detected on (ref_0 = 0). Ignored for new."),
+                    tooltip="remove: erase it. keep: hold it in place while the rest changes "
+                            "(also how you name something the prompt talks about). new: "
+                            "desc says what goes there or how to change it (\"Change the "
+                            "jacket to blue\")."),
+                io.String.Input("tag", default="",
+                    tooltip="The name to use in your prompt: dog gives <dog_1>, <dog_2>… "
+                            "numbered left to right, and carries on across chained nodes. "
+                            "Empty: the detector's label, or obj."),
                 io.String.Input("desc", default="",
-                    tooltip="What the boxes contain. Empty: the detector's label, if it gives one."),
-                io.String.Input("id", default="",
-                    tooltip="Name for the elements (dog → dog_1, dog_2…). Empty: taken from the description."),
-                io.Float.Input("min_score", default=0.0, min=0.0, max=1.0, step=0.01,
-                    tooltip="Skip detections below this confidence."),
-                io.Int.Input("max_boxes", default=0, min=0, max=64,
-                    tooltip="Keep only the most confident N boxes. 0 = all."),
+                    tooltip="What it is, or for new what to do. Empty: the detector's label "
+                            "when it gives one. Run the node to see the tags it made."),
+                NKDKleinBoxesType.Input("boxes", optional=True,
+                    tooltip="Elements from a previous Box Detections node, to chain several."),
+                io.Int.Input("reference", default=0, min=0, max=7, advanced=True, optional=True,
+                    tooltip="Which reference the detections were made on (ref_0 = 0)."),
             ],
             outputs=[NKDKleinBoxesType.Output(display_name="boxes")],
+            # Output node, so it can run on its own and show the tags it made before you write the prompt.
+            is_output_node=True,
         )
 
     @classmethod
-    def execute(cls, action: str, reference: int, desc: str, id: str, min_score: float,
-                max_boxes: int, boxes=None, bboxes=None, segs=None, image=None) -> io.NodeOutput:
-        dets = []
-        if segs is not None:
-            d, w, h = _from_segs(segs)
-            dets.append((d, w, h))
-        if bboxes is not None:
-            if image is None:
-                raise ValueError("Box Detections: connect the image the bboxes were detected on")
-            dets.append((_from_bounding_box(bboxes), image.shape[2], image.shape[1]))
+    def execute(cls, detections, action: str, desc: str, tag: str = "", reference: int = 0,
+                boxes=None) -> io.NodeOutput:
         prev = merge_elements(boxes)
-        taken = {e["id"] for e in prev["elements"]}
-        new = []
-        for d, w, h in dets:
-            new += detection_elements(d, w, h, action, reference, desc, id, min_score, max_boxes, taken)
-        return io.NodeOutput({"elements": prev["elements"] + new})
+        dets, size = _detections(detections)
+        new = detection_elements(dets, size, action, reference, desc, {e["id"] for e in prev["elements"]}, tag)
+        # Shown on the node: the tags to use in the prompt, e.g. "<dog_1>  remove  golden retriever".
+        lines = [f"<{e['id']}>  {e['kind']}  {e['desc']}".rstrip() for e in prev["elements"] + new]
+        return io.NodeOutput({"elements": prev["elements"] + new},
+                             ui=ui.PreviewText("\n".join(lines) or "nothing detected"))
