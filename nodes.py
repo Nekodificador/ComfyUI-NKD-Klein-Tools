@@ -237,6 +237,13 @@ class NKDKleinPresampling(io.ComfyNode):
                         "padding focuses tighter on the masked area."
                     ),
                     display_name="Detail Padding"),
+                # Last widget: workflows saved by position (no name map) keep their values.
+                io.Boolean.Input("upsample_prompt", default=True, display_name="Upsample Prompt",
+                    tooltip=(
+                        "Klein 3. With an upsampler connected, rewrite your prompt into the "
+                        "detailed one Klein works best with. Turn it off to send your prompt "
+                        "as typed without disconnecting anything."
+                    )),
                 # ---- reference images (autogrow) ----
                 # Last and optional (the frontend lists required sockets first): the slots it adds
                 # are appended at the bottom, so they must already sit below mask/boxes/upsampler.
@@ -321,6 +328,7 @@ class NKDKleinPresampling(io.ComfyNode):
         reference_strength: int = 0,
         model_family: str = "Klein 2",
         boxes_json: str = "",
+        upsample_prompt: bool = True,
     ) -> io.NodeOutput:
 
         # 0. Pin model in VRAM if requested
@@ -465,7 +473,7 @@ class NKDKleinPresampling(io.ComfyNode):
             else:
                 logging.getLogger(__name__).warning(
                     "NKD Klein Presampling: boxes only work with Klein 3 — ignored.")
-        if upsampler is not None:
+        if upsampler is not None and upsample_prompt:
             # The upsampler sees what the model sees: the detailing crop stands in for ref_0.
             up_refs = ([crop_img if crop_img is not None else ref_0] + refs[1:]) if refs else []
             positive = _upsample(upsampler, positive, up_refs, bfl_rows(rows) if rows else None, (width, height))

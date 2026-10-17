@@ -152,12 +152,13 @@ function wrapWidgetCallback(node, name, handler) {
     w._nkd_cb_wrapped = true;
 }
 
-// Klein 2 shows Reference Strength; Klein 3 shows Bounding Boxes. The combo only
+// Klein 2 shows Reference Strength; Klein 3 shows Bounding Boxes and Upsample Prompt. The combo only
 // drives what is visible — the backend detects the real model when it runs.
 function updateModelWidgets(node) {
     const klein3 = getWidgetValue(node, "model_family") === "Klein 3";
     const boxBtn = node._nkdBoxBtn;                       // ✎ Draw boxes (Klein 3 only)
     if (boxBtn) { if (klein3) showWidget(boxBtn); else hideWidget(boxBtn); }
+    setWidgetVisible(node, "upsample_prompt", klein3);  // the upsampler is written for Klein 3
     updateResolutionWidgets(node);          // owns reference_strength (needs a reference AND Klein 2)
 }
 
@@ -451,6 +452,10 @@ function guardWidgetOrder(nodeType, nodeName, version, newDefaults = {}) {
                     w.callback?.(def);
                 }
             }
+        } else if (Array.isArray(info?.widgets_values) && info.widgets_values.length
+            && restorePositional(this, info.widgets_values, newDefaults)) {
+            // Saved by position only: re-applied in order, skipping widgets that aren't
+            // saved (the ✎ Draw boxes button), which the core restore counted anyway.
         } else if (version > 1
             && info?.properties?.[SCHEMA_PROP] !== version
             && Array.isArray(info?.widgets_values) && info.widgets_values.length) {
@@ -467,12 +472,36 @@ function guardWidgetOrder(nodeType, nodeName, version, newDefaults = {}) {
     };
 }
 
+// A workflow with no name map: put each saved value on the next widget that is saved,
+// but only if every value fits its widget (combo option, boolean, number, text); a
+// mismatch means an older layout, which this can't repair. Widgets past the end of the
+// saved list are newer than the save: back to their default.
+function restorePositional(node, values, newDefaults) {
+    const saved = (node.widgets || []).filter(w => w.serialize !== false && w.options?.serialize !== false);
+    if (values.length > saved.length) return false;
+    const fits = (w, v) => {
+        if (w.type === "combo") return (w.options?.values || []).includes(v);
+        if (w.type === "toggle") return typeof v === "boolean";
+        if (w.type === "number" || w.type === "slider") return typeof v === "number";
+        return typeof v === "string" || v == null;
+    };
+    if (!values.every((v, i) => fits(saved[i], v))) return false;
+    values.forEach((v, i) => { if (saved[i].value !== v) { saved[i].value = v; saved[i].callback?.(v); } });
+    for (const w of saved.slice(values.length)) {
+        if (w.name in newDefaults && w.value !== newDefaults[w.name]) {
+            w.value = newDefaults[w.name];
+            w.callback?.(w.value);
+        }
+    }
+    return true;
+}
+
 const KLEIN_NEW_WIDGET_DEFAULTS = {
-    NKDKleinPresampling: { model_family: "Klein 2", boxes_json: "" },
+    NKDKleinPresampling: { model_family: "Klein 2", boxes_json: "", upsample_prompt: true },
 };
 
 const KLEIN_SCHEMA_VERSIONS = {
-    NKDKleinPresampling: 2,        // v2: Model + Bounding Boxes widgets added up front
+    NKDKleinPresampling: 2,        // v2: Model + Bounding Boxes widgets added up front (Upsample Prompt went last: no reorder)
     NKDKleinPostsampling: 1,
     NKDKleinReferenceWeight: 1,
     NKDKleinReferenceControl: 1,

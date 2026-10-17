@@ -14,7 +14,8 @@ Klein 3 is built to read a long, planned prompt, and a short one typed as is giv
 - With boxes (drawn or from Box Detections) it plans the edit around them and keeps every box exactly where it is. It may add a few boxes of its own for things it decides to protect, such as the person next to what you remove.
 - Without references it composes for your canvas shape.
 - The **prompt** output shows the final text the model reads. Connect it to a text preview to see what the upsampler wrote.
-- Any other instruct LLM loaded with Load CLIP also works, just not as well. To turn it off, disconnect the input.
+- Any other instruct LLM loaded with Load CLIP also works, just not as well.
+- **Upsample Prompt** (the last setting, Klein 3) turns it on and off without disconnecting anything, handy to compare your own prompt with the upsampled one.
 
 It runs once per change and is cached like the rest of the node, but the first run takes a while and the 9B model needs memory of its own.
 

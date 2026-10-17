@@ -2,9 +2,10 @@
 
 ## What's new in 1.13.x
 
+- **Fix: older workflows loading Presampling settings into the wrong places.** A workflow saved without setting names (like the bundled example) shifted every value from *Pin Model* down by one since 1.12. They load correctly again.
 - **Fix: box editor showing the wrong image.** With a reference coming from a node that has several image outputs (like Freeze Frames), the editor showed that node's first image instead of the one you connected. It now shows what Presampling received, after one run.
 - **Presampling: reference slots grow at the bottom.** New ref slots no longer appear in between mask, boxes and upsampler. Saved workflows keep their connections.
-- **Prompt upsampler in Presampling** *(Klein 3)*. Connect Black Forest Labs' upsampler (loaded with Load CLIP) to the new **upsampler** input and write a short request; Presampling expands it into the detailed prompt Klein 3 expects. It looks at all your references, works with boxes without moving them, and a new **prompt** output shows the final text. See [the nodes](nodes.md#prompt-upsampler-klein-3).
+- **Prompt upsampler in Presampling** *(Klein 3)*. Connect Black Forest Labs' upsampler (loaded with Load CLIP) to the new **upsampler** input and write a short request; Presampling expands it into the detailed prompt Klein 3 expects. It looks at all your references, works with boxes without moving them, and a new **prompt** output shows the final text. An **Upsample Prompt** switch turns it off without disconnecting it. See [the nodes](nodes.md#prompt-upsampler-klein-3).
 - **New node: 😺NKD Klein Box Detections** *(Klein 3)*. Remove, keep or change things a detector found, with no drawing, so workflows can run on their own. One input takes a mask, SAM3 / RT-DETR boxes or Ultralytics SEGS, and you only pick an action and, if you like, a description. Chain one per detection into Presampling's new **boxes** input. See [the nodes](nodes.md#nkd-klein-box-detections-optional-klein-3).
 - **Boxes: the caption tags itself.** When your prompt doesn't mention an element's `<id>`, a sentence for it is added in the form Klein 3 follows best. Applies to the box editor and Box Prompt too; elements you already tag are left alone.
 
