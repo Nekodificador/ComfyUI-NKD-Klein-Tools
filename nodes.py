@@ -720,14 +720,13 @@ class NKDKleinPostsampling(io.ComfyNode):
 
                 io.Float.Input("match_original_colors", default=0.0, min=0.0, max=1.0, step=0.05,
                     tooltip=(
-                        "Pulls the regenerated area's colors and lighting back toward "
-                        "the original image. The model often shifts the overall "
-                        "white balance or saturation slightly — this corrects that "
-                        "drift so the composite looks like it belongs to the same "
-                        "scene. 0 leaves the colors as the model produced them; "
-                        "1 fully matches them to the original. Statistics are read "
-                        "only from the unchanged background, so the edit itself "
-                        "keeps the colors it was supposed to have."
+                        "Pulls the colors and lighting of what the model regenerated back "
+                        "toward the original image, to correct the slight white balance "
+                        "or saturation drift it often adds. With a mask (or Auto-Detect "
+                        "Edit Region) it works on the edited area; without either, on the "
+                        "whole image against ref_0. 0 leaves the colors as the model made "
+                        "them, 1 matches them fully. High values also pull back color "
+                        "changes you asked for (a relight, a new color): keep it low then."
                     ),
                     display_name="Match Original Colors"),
 
@@ -931,6 +930,14 @@ class NKDKleinPostsampling(io.ComfyNode):
                 composite = _with_alpha(
                     composite, torch.from_numpy(sharp_mask).unsqueeze(0))
             return io.NodeOutput(composite, debug)
+
+        # Case 3b: img2img without a mask or auto-detect → no region to blend back, so
+        # Match Original Colors pulls the whole image's colour statistics toward ref_0.
+        if match_original_colors > 0.0 and bundle.mode == "img2img" and bundle.original_image is not None:
+            orig = _resize(bundle.original_image, image.shape[2], image.shape[1])
+            full = torch.ones(image.shape[0], image.shape[1], image.shape[2], device=image.device)
+            matched = _apply_post_blend(orig, image, match_original_colors, False, mask=full)
+            return io.NodeOutput(matched, _difference_debug(matched, orig))
 
         # Case 3: t2i / img2img passthrough (no original to diff against, or auto-detect off)
         debug = torch.zeros_like(image)

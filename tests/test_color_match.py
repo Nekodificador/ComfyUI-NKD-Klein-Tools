@@ -35,5 +35,19 @@ def test_match_colors_moves_edit():
     print("klein colour match moves edit OK")
 
 
+def test_match_colors_whole_image():
+    # No mask (img2img passthrough): a full mask matches the whole image to the original.
+    rng = np.random.default_rng(1)
+    orig = rng.random((64, 64, 3), dtype=np.float32) * 0.6 + 0.2
+    gen = np.clip(orig * 0.8 + np.array([0.15, 0.0, -0.1], np.float32), 0, 1)
+    full = np.ones((64, 64), dtype=np.float32)
+    out = _composite_with_options(orig, gen, full, None, color_match_strength=1.0, seamless=False)
+    assert np.abs(out.mean((0, 1)) - orig.mean((0, 1))).max() < np.abs(gen.mean((0, 1)) - orig.mean((0, 1))).max()
+    half = _composite_with_options(orig, gen, full, None, color_match_strength=0.0, seamless=False)
+    assert np.allclose(half, gen, atol=1e-5)                       # 0 leaves the model's colours
+    print("klein colour match whole image OK")
+
+
 if __name__ == "__main__":
     test_match_colors_moves_edit()
+    test_match_colors_whole_image()

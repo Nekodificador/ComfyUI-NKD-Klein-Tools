@@ -2,6 +2,8 @@
 
 ## What's new in 1.13.x
 
+- **New example workflow for Klein 3** (distilled), with the prompt upsampler wired in: `example_workflows/NKD Klein Tools - Klein 3 Distilled.json`.
+- ***Match Original Colors* now works without a mask** *(Postsampling)*. On a plain edit with references (no mask, no detailing, Auto-Detect off) it did nothing; it now matches the whole image's colors to ref_0. Its tooltip also says when it acts.
 - **Fix: older workflows loading Presampling settings into the wrong places.** A workflow saved without setting names (like the bundled example) shifted every value from *Pin Model* down by one since 1.12. They load correctly again.
 - **Fix: box editor showing the wrong image.** With a reference coming from a node that has several image outputs (like Freeze Frames), the editor showed that node's first image instead of the one you connected. It now shows what Presampling received, after one run.
 - **Presampling: reference slots grow at the bottom.** New ref slots no longer appear in between mask, boxes and upsampler. Saved workflows keep their connections.
