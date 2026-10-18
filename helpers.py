@@ -418,7 +418,9 @@ def _resolve_resolution(
     if aspect_ratio == "As Reference":
         if ref_image is not None:
             return _scale_to_megapixels(ref_image.shape[2], ref_image.shape[1], target_pixels)
-        return _clamp_to_megapixel(custom_width, custom_height, target_pixels)
+        # No image (t2i): only the custom SHAPE applies (its size fields are hidden here),
+        # scaled to the budget both ways; clamping would ignore Megapixels above 1.
+        return _scale_to_megapixels(custom_width, custom_height, target_pixels)
 
     if aspect_ratio == "Custom":
         return _clamp_to_megapixel(custom_width, custom_height, target_pixels)

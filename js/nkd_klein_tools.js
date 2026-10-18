@@ -200,15 +200,17 @@ function setWidgetVisible(node, name, visible) {
 // Master visibility pass for the resolution / reference area. Driven by:
 //  - resize: when off, the node makes no sizing decision, so Aspect Ratio,
 //    Megapixels, Custom W/H and Image Fit (and its dependents) are all hidden.
+//    Without a reference there is nothing to keep the size of: Resize itself
+//    hides and the sizing controls always show (the backend sizes t2i anyway).
 //  - reference connected: bypass_reference / reference_strength only matter then.
 //  - aspect_ratio: Custom W/H only for "Custom"; Image Fit only when the ratio
 //    can differ from the source (i.e. NOT "As Reference").
 function updateResolutionWidgets(node) {
-    const resize    = getWidgetValue(node, "resize") !== false;   // default on
     const refOn     = isRefConnected(node);
+    const resize    = !refOn || getWidgetValue(node, "resize") !== false;   // default on
     const aspect    = getWidgetValue(node, "aspect_ratio");
 
-    // Sizing controls — only when Resize is on.
+    setWidgetVisible(node, "resize", refOn);
     setWidgetVisible(node, "aspect_ratio", resize);
     setWidgetVisible(node, "megapixels", resize);
     setWidgetVisible(node, "custom_width",  resize && aspect === "Custom");

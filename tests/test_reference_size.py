@@ -29,6 +29,12 @@ def test_other_aspect_respects_the_pixel_budget_and_the_16_grid():
         assert w * h <= GRID[0] * GRID[1] * 1.05 or (w, h) == (208, 208), (ref, w, h)
 
 
+def test_as_reference_without_image_follows_megapixels():
+    from helpers import _resolve_resolution
+    assert _resolve_resolution("As Reference", 4.0, 1024, 1024) == (2048, 2048)
+    assert _resolve_resolution("As Reference", 1.0, 1024, 1024) == (1024, 1024)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
