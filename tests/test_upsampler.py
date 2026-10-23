@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from upsampler import SYSTEM_PROMPTS, reconcile, reference_size, request, split_table  # noqa: E402
+from upsampler import SYSTEM_PROMPTS, cache_key, reconcile, reference_size, request, split_table  # noqa: E402
 
 LOCK = [{"id": "dog_1", "from": "ref_image_0", "src_bbox": [500, 100, 900, 500], "tgt_bbox": None, "desc": "dog"}]
 
@@ -56,6 +56,16 @@ def test_reconcile_reimposes_and_renames():
 def test_reconcile_mentions_uncited_locked_ids():
     cap, rows = split_table(reconcile("Remove the animal.", LOCK))
     assert cap.endswith("<dog_1>") and rows == LOCK
+
+
+def test_cache_key_ignores_nothing_relevant():
+    base = cache_key("a cat", [((1, 8, 8, 3), 1.5)], None, (1024, 1024))
+    assert base == cache_key("a cat", [((1, 8, 8, 3), 1.5)], None, (1024, 1024))
+    assert base != cache_key("a dog", [((1, 8, 8, 3), 1.5)], None, (1024, 1024))
+    assert base != cache_key("a cat", [((1, 8, 8, 3), 1.6)], None, (1024, 1024))
+    assert base != cache_key("a cat", [], None, (1024, 1024))
+    assert base != cache_key("a cat", [((1, 8, 8, 3), 1.5)], None, (1024, 768))
+    assert base != cache_key("a cat", [((1, 8, 8, 3), 1.5)], LOCK, (1024, 1024))
 
 
 if __name__ == "__main__":

@@ -654,10 +654,19 @@ class NKDKleinPresampling(io.ComfyNode):
         return io.NodeOutput(model, pos, neg, latent, bundle, out_mask, ref_0_out, positive, ui=ui)
 
 
+_UPSAMPLE_CACHE: dict[str, str] = {}
+
+
 def _upsample(clip, prompt: str, images: list, locked, canvas) -> str:
     """Rewrite the prompt with an instruct LLM loaded as a CLIP, in BFL's upsampler format.
     Locked box rows go in as authoritative and are put back on the answer."""
     import comfy.utils
+    # ponytail: tiny memo so model-side changes (a LoRA weight) don't re-run the LLM;
+    # ComfyUI's cache is per node, so Presampling re-executes whole. Grows to 8 entries.
+    sigs = [(tuple(im.shape), round(float(im.float().sum()), 3)) for im in images]
+    cache_key = _ups.cache_key(prompt, sigs, locked, canvas)
+    if cache_key in _UPSAMPLE_CACHE:
+        return _UPSAMPLE_CACHE[cache_key]
     key, text = _ups.request(prompt, len(images), locked, canvas)
     imgs = []
     for im in images:
@@ -672,6 +681,9 @@ def _upsample(clip, prompt: str, images: list, locked, canvas) -> str:
         raise RuntimeError("NKD Klein Presampling: the upsampler returned an empty prompt")
     out = _ups.reconcile(answer, locked) if locked else answer
     logging.getLogger(__name__).info("NKD Klein Presampling: upsampled prompt (%s): %s", key, out)
+    if len(_UPSAMPLE_CACHE) >= 8:
+        _UPSAMPLE_CACHE.pop(next(iter(_UPSAMPLE_CACHE)))
+    _UPSAMPLE_CACHE[cache_key] = out
     return out
 
 

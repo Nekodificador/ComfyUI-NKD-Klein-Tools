@@ -153,3 +153,13 @@ def reconcile(text: str, locked: list[dict]) -> str:
 def clean_answer(text: str) -> str:
     """Drop a reasoning block or stray chat markers some LLMs leave around the answer."""
     return text.split("</think>")[-1].replace("<|im_end|>", "").strip()
+
+
+def cache_key(prompt: str, image_sigs, locked, canvas) -> str:
+    """Everything the rewritten prompt depends on, as one string.
+
+    ComfyUI's cache is per node, so anything coming in through MODEL (a LoRA weight,
+    for instance) re-runs Presampling whole. This lets the LLM call sit out those runs.
+    `image_sigs` is one cheap signature per reference, computed by the caller.
+    """
+    return json.dumps([prompt, list(image_sigs), locked, list(canvas)], ensure_ascii=False, sort_keys=True)
