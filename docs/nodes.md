@@ -16,6 +16,7 @@ Klein 3 is built to read a long, planned prompt, and a short one typed as is giv
 - The **prompt** output shows the final text the model reads. Connect it to a text preview to see what the upsampler wrote.
 - Any other instruct LLM loaded with Load CLIP also works, just not as well.
 - **Upsample Prompt** (the last setting, Klein 3) turns it on and off without disconnecting anything, handy to compare your own prompt with the upsampled one.
+- **Upsample Style** picks how much it adds. **Faithful** (default) keeps to what you wrote, fixes it up and lays it out clearly, adding only what the picture needs; complex scenes, counts and edits still come out right. **Full** is Black Forest Labs' original: it plans every detail you left open, so it may change the setting, invent props or decide what people look like.
 
 It runs once per change and is cached like the rest of the node, but the first run takes a while and the 9B model needs memory of its own.
 

@@ -15,6 +15,12 @@ import re
 with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "upsampler_prompts.json"), encoding="utf-8") as _f:
     SYSTEM_PROMPTS = json.load(_f)
 
+# Faithful style (ours, not BFL's): BFL's prompts plan every open detail, inventing props, people's
+# looks and scenery. The upsampler was trained on them and mostly ignores a new system prompt, so the
+# rule also rides in the user message, which it does follow. Box tables keep BFL's system prompt.
+with open(os.path.join(os.path.dirname(os.path.realpath(__file__)), "upsampler_faithful.json"), encoding="utf-8") as _f:
+    FAITHFUL = json.load(_f)
+
 MAX_TOKENS = 3584
 PRESENCE_PENALTY = {"t2i": 1.5, "i2i": 0.0}
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -25,7 +31,8 @@ def _ratio(w: int, h: int) -> str:
     return f"{int(w) // g}:{int(h) // g}"
 
 
-def request(prompt: str, n_refs: int, locked: list[dict] | None = None, canvas=None) -> tuple[str, str]:
+def request(prompt: str, n_refs: int, locked: list[dict] | None = None, canvas=None,
+            faithful: bool = False) -> tuple[str, str]:
     """(system prompt key, user message) in the upsampler's own scaffolds."""
     task = "i2i" if n_refs else "t2i"
     text = (prompt or "").strip()
@@ -45,7 +52,13 @@ def request(prompt: str, n_refs: int, locked: list[dict] | None = None, canvas=N
                     "Output the caption.")
     elif canvas:
         text = f"TARGET CANVAS: {_ratio(*canvas)}\n{text}"
+    if faithful:
+        text = f"{text}\n\n{FAITHFUL['suffix']}"
     return (f"{task}_bbox" if locked else task), text
+
+
+def system_prompt(key: str, faithful: bool) -> str:
+    return FAITHFUL.get(key, SYSTEM_PROMPTS[key]) if faithful else SYSTEM_PROMPTS[key]
 
 
 def reference_size(w: int, h: int, n_refs: int) -> tuple[int, int]:
@@ -155,11 +168,11 @@ def clean_answer(text: str) -> str:
     return text.split("</think>")[-1].replace("<|im_end|>", "").strip()
 
 
-def cache_key(prompt: str, image_sigs, locked, canvas) -> str:
+def cache_key(prompt: str, image_sigs, locked, canvas, faithful: bool = False) -> str:
     """Everything the rewritten prompt depends on, as one string.
 
     ComfyUI's cache is per node, so anything coming in through MODEL (a LoRA weight,
     for instance) re-runs Presampling whole. This lets the LLM call sit out those runs.
     `image_sigs` is one cheap signature per reference, computed by the caller.
     """
-    return json.dumps([prompt, list(image_sigs), locked, list(canvas)], ensure_ascii=False, sort_keys=True)
+    return json.dumps([prompt, list(image_sigs), locked, list(canvas), faithful], ensure_ascii=False, sort_keys=True)

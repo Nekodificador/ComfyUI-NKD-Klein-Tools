@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from upsampler import SYSTEM_PROMPTS, cache_key, reconcile, reference_size, request, split_table  # noqa: E402
+from upsampler import FAITHFUL, SYSTEM_PROMPTS, cache_key, system_prompt, reconcile, reference_size, request, split_table  # noqa: E402
 
 LOCK = [{"id": "dog_1", "from": "ref_image_0", "src_bbox": [500, 100, 900, 500], "tgt_bbox": None, "desc": "dog"}]
 
@@ -66,6 +66,17 @@ def test_cache_key_ignores_nothing_relevant():
     assert base != cache_key("a cat", [], None, (1024, 1024))
     assert base != cache_key("a cat", [((1, 8, 8, 3), 1.5)], None, (1024, 768))
     assert base != cache_key("a cat", [((1, 8, 8, 3), 1.5)], LOCK, (1024, 1024))
+    assert base != cache_key("a cat", [((1, 8, 8, 3), 1.5)], None, (1024, 1024), True)
+
+
+def test_faithful_style():
+    # Own system prompt for prose, BFL's for box tables; the rule also rides in the user message.
+    assert system_prompt("t2i", True) == FAITHFUL["t2i"] != SYSTEM_PROMPTS["t2i"]
+    assert system_prompt("i2i_bbox", True) == SYSTEM_PROMPTS["i2i_bbox"]
+    assert system_prompt("t2i", False) == SYSTEM_PROMPTS["t2i"]
+    k, t = request("a cat", 0, canvas=(1024, 1024), faithful=True)
+    assert t == "TARGET CANVAS: 1:1\na cat\n\n" + FAITHFUL["suffix"]
+    assert request("a cat", 1, LOCK, faithful=True)[1].endswith(FAITHFUL["suffix"])
 
 
 if __name__ == "__main__":

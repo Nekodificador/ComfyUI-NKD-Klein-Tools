@@ -244,6 +244,13 @@ class NKDKleinPresampling(io.ComfyNode):
                         "detailed one Klein works best with. Turn it off to send your prompt "
                         "as typed without disconnecting anything."
                     )),
+                io.Combo.Input("upsample_style", options=["Faithful", "Full"], default="Faithful",
+                    display_name="Upsample Style",
+                    tooltip=(
+                        "Klein 3. Faithful keeps to what you wrote and only adds what the image "
+                        "needs to be drawn. Full is BFL's original upsampler: it plans every "
+                        "detail you left open, adding props, people's looks and scenery."
+                    )),
                 # ---- reference images (autogrow) ----
                 # Last and optional (the frontend lists required sockets first): the slots it adds
                 # are appended at the bottom, so they must already sit below mask/boxes/upsampler.
@@ -329,6 +336,7 @@ class NKDKleinPresampling(io.ComfyNode):
         model_family: str = "Klein 2",
         boxes_json: str = "",
         upsample_prompt: bool = True,
+        upsample_style: str = "Faithful",
     ) -> io.NodeOutput:
 
         # 0. Pin model in VRAM if requested
@@ -476,7 +484,8 @@ class NKDKleinPresampling(io.ComfyNode):
         if upsampler is not None and upsample_prompt:
             # The upsampler sees what the model sees: the detailing crop stands in for ref_0.
             up_refs = ([crop_img if crop_img is not None else ref_0] + refs[1:]) if refs else []
-            positive = _upsample(upsampler, positive, up_refs, bfl_rows(rows) if rows else None, (width, height))
+            positive = _upsample(upsampler, positive, up_refs, bfl_rows(rows) if rows else None, (width, height),
+                                 faithful=upsample_style == "Faithful")
         elif rows:
             positive = _emit(positive, rows)
         pos = clip.encode_from_tokens_scheduled(clip.tokenize(positive))
@@ -657,23 +666,23 @@ class NKDKleinPresampling(io.ComfyNode):
 _UPSAMPLE_CACHE: dict[str, str] = {}
 
 
-def _upsample(clip, prompt: str, images: list, locked, canvas) -> str:
+def _upsample(clip, prompt: str, images: list, locked, canvas, faithful: bool = False) -> str:
     """Rewrite the prompt with an instruct LLM loaded as a CLIP, in BFL's upsampler format.
     Locked box rows go in as authoritative and are put back on the answer."""
     import comfy.utils
     # ponytail: tiny memo so model-side changes (a LoRA weight) don't re-run the LLM;
     # ComfyUI's cache is per node, so Presampling re-executes whole. Grows to 8 entries.
     sigs = [(tuple(im.shape), round(float(im.float().sum()), 3)) for im in images]
-    cache_key = _ups.cache_key(prompt, sigs, locked, canvas)
+    cache_key = _ups.cache_key(prompt, sigs, locked, canvas, faithful)
     if cache_key in _UPSAMPLE_CACHE:
         return _UPSAMPLE_CACHE[cache_key]
-    key, text = _ups.request(prompt, len(images), locked, canvas)
+    key, text = _ups.request(prompt, len(images), locked, canvas, faithful)
     imgs = []
     for im in images:
         w, h = _ups.reference_size(im.shape[2], im.shape[1], len(images))
         im = comfy.utils.common_upscale(im[:1, :, :, :3].movedim(-1, 1), w, h, "lanczos", "disabled").movedim(1, -1)
         imgs.append(im.clamp(0, 1))
-    tokens = clip.tokenize(text, images=imgs, system_prompt=_ups.SYSTEM_PROMPTS[key], thinking=False, min_length=1)
+    tokens = clip.tokenize(text, images=imgs, system_prompt=_ups.system_prompt(key, faithful), thinking=False, min_length=1)
     ids = clip.generate(tokens, do_sample=False, max_length=_ups.MAX_TOKENS, top_k=20, top_p=0.95,
                         presence_penalty=_ups.PRESENCE_PENALTY["i2i" if images else "t2i"])
     answer = _ups.clean_answer(clip.decode(ids))

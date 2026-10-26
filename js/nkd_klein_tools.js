@@ -159,6 +159,7 @@ function updateModelWidgets(node) {
     const boxBtn = node._nkdBoxBtn;                       // ✎ Draw boxes (Klein 3 only)
     if (boxBtn) { if (klein3) showWidget(boxBtn); else hideWidget(boxBtn); }
     setWidgetVisible(node, "upsample_prompt", klein3);  // the upsampler is written for Klein 3
+    setWidgetVisible(node, "upsample_style", klein3);
     updateResolutionWidgets(node);          // owns reference_strength (needs a reference AND Klein 2)
 }
 
@@ -499,7 +500,7 @@ function restorePositional(node, values, newDefaults) {
 }
 
 const KLEIN_NEW_WIDGET_DEFAULTS = {
-    NKDKleinPresampling: { model_family: "Klein 2", boxes_json: "", upsample_prompt: true },
+    NKDKleinPresampling: { model_family: "Klein 2", boxes_json: "", upsample_prompt: true, upsample_style: "Faithful" },
 };
 
 const KLEIN_SCHEMA_VERSIONS = {
