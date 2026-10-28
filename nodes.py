@@ -735,7 +735,9 @@ class NKDKleinPostsampling(io.ComfyNode):
                     tooltip=(
                         "How softly the regenerated zone blends back into the "
                         "original image. Higher values give a more gradual "
-                        "transition; lower values keep the edge crisp."
+                        "transition; lower values keep the edge crisp. Without "
+                        "detailing the fade runs inward from the mask edge, so "
+                        "nothing outside the mask changes."
                     ),
                     display_name="Uncrop Feather"),
 
@@ -913,7 +915,7 @@ class NKDKleinPostsampling(io.ComfyNode):
             orig    = _resize(bundle.original_image, bundle.target_width, bundle.target_height)
             sampled = _resize(image, bundle.target_width, bundle.target_height)
             if bundle.processed_mask is not None:
-                mask_2d = bundle.processed_mask
+                mask_2d = _feather_inward(bundle.processed_mask, uncrop_feather)
                 alpha = mask_2d.unsqueeze(-1)
             else:
                 mask_2d = torch.ones(
@@ -963,6 +965,16 @@ class NKDKleinPostsampling(io.ComfyNode):
         # Case 3: t2i / img2img passthrough (no original to diff against, or auto-detect off)
         debug = torch.zeros_like(image)
         return io.NodeOutput(image, debug)
+
+
+def _feather_inward(mask: torch.Tensor, feather: int) -> torch.Tensor:
+    """Soft edge that fades from 0 at the mask border to 1 `2·feather` px inside,
+    so nothing outside the mask is touched. Erode + blur with the same kernel the
+    detailing uncrop uses, then clip to the mask. Image borders stay hard."""
+    if feather <= 0:
+        return mask
+    ramp = 1.0 - _mask_grow(1.0 - mask, feather, feather)
+    return torch.minimum(mask, ramp.to(mask.device, mask.dtype))
 
 
 def _with_alpha(image: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
