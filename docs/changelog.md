@@ -2,6 +2,8 @@
 
 ## What's new in 1.13.x
 
+- **License is now GPL-3.0**, the same as ComfyUI. Releases up to 1.13.2 stay MIT.
+- ***Uncrop Feather* now works on masked edits without detailing** *(Postsampling)*.
 - **Prompt upsampler: new *Upsample Style* setting, *Faithful* by default** *(Klein 3)*. The upsampler now keeps to your prompt instead of rewriting the scene: no invented props, settings or looks for people, while complex scenes, counts and edits still come out right. *Full* brings back the original behaviour.
 - **New example workflow for Klein 3** (distilled), with the prompt upsampler wired in: `example_workflows/NKD Klein Tools - Klein 3 Distilled.json`.
 - ***Match Original Colors* now works without a mask** *(Postsampling)*. On a plain edit with references (no mask, no detailing, Auto-Detect off) it did nothing; it now matches the whole image's colors to ref_0. Its tooltip also says when it acts.
