@@ -93,7 +93,7 @@ Or install via the ComfyUI Manager by searching for **NKD Klein Tools**.
 
 ## License
 
-MIT
+GPL-3.0. See [LICENSE](LICENSE).
 
 ---
 
