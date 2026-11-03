@@ -234,7 +234,76 @@ function updateResolutionWidgets(node) {
         setWidgetVisible(node, "slide", false);
     }
 
+    ensureResolutionPreview(node);
+    updateResolutionPreview(node);
     refreshNode(node);
+}
+
+// ---- final-resolution text under Megapixels (mirrors helpers._resolve_resolution) ----
+function nkdScaleMp(w, h, px) {                 // helpers._scale_to_megapixels: /16 candidate closest in aspect
+    const a = w / h, ih = Math.sqrt(px / a), iw = ih * a;
+    let best = null;
+    for (const cw of [Math.floor(iw / 16) * 16, (Math.floor(iw / 16) + 1) * 16])
+        for (const ch of [Math.floor(ih / 16) * 16, (Math.floor(ih / 16) + 1) * 16]) {
+            const c = [Math.abs(cw / ch - a) / a, Math.abs(cw * ch - px) / px, Math.max(16, cw), Math.max(16, ch)];
+            if (!best || c[0] < best[0] || (c[0] === best[0] && c[1] < best[1])) best = c;
+        }
+    return [best[2], best[3]];
+}
+
+function nkdRef0Size(node) {                    // size of ref_0 if the upstream node has a loaded preview
+    const inp = node.inputs?.find(i => i.name === "ref_0" || i.name === "ref_images.ref_0");
+    const src = inp?.link != null ? node.graph?.getNodeById(node.graph.links[inp.link]?.origin_id) : null;
+    const im = src?.imgs?.[0];
+    return im?.naturalWidth ? [im.naturalWidth, im.naturalHeight] : null;
+}
+
+function updateResolutionPreview(node) {
+    const el = node._nkdResEl;
+    if (!el) return;
+    const refOn = isRefConnected(node);
+    const visible = !refOn || getWidgetValue(node, "resize") !== false;
+    if (node._nkdResW) node._nkdResW.hidden = !visible;
+    if (!visible) return;
+    const px = Math.round(Number(getWidgetValue(node, "megapixels") ?? 1) * 1048576);
+    const aspect = getWidgetValue(node, "aspect_ratio");
+    const cw = getWidgetValue(node, "custom_width") ?? 1024, ch = getWidgetValue(node, "custom_height") ?? 1024;
+    let size = null;
+    if (aspect === "As Reference") {
+        const r = refOn ? nkdRef0Size(node) : [cw, ch];
+        size = r ? nkdScaleMp(r[0], r[1], px) : null;
+    } else if (aspect === "Custom") {
+        size = cw * ch <= px ? [Math.ceil(cw / 16) * 16, Math.ceil(ch / 16) * 16] : nkdScaleMp(cw, ch, px);
+    } else {
+        const m = /^(\d+):(\d+)/.exec(aspect || "");
+        if (m) {
+            const rd = v => Math.max(16, Math.ceil(Math.floor(v) / 16) * 16);
+            size = [rd(Math.sqrt(px * m[1] / m[2])), rd(Math.sqrt(px * m[2] / m[1]))];
+        }
+    }
+    el.textContent = size
+        ? `→ ${size[0]} × ${size[1]} px  (${(size[0] * size[1] / 1048576).toFixed(2)} MP)`
+        : "→ same shape as ref_0 (size shown once its image is loaded)";
+}
+
+function ensureResolutionPreview(node) {
+    if (node._nkdResEl) return;
+    const el = document.createElement("div");
+    Object.assign(el.style, {
+        fontFamily: "monospace", fontSize: "11px", color: "#c8d0e0",
+        padding: "2px 6px", boxSizing: "border-box", width: "100%",
+    });
+    node._nkdResW = node.addDOMWidget("nkd_resolution", "NKD_RES_PREVIEW", el, {
+        serialize: false, hideOnZoom: false,
+        getMinHeight: () => 20, getMaxHeight: () => 20, getHeight: () => 20,
+    });
+    node._nkdResEl = el;
+    // Legacy canvas sizes the node from computeSize: without it the line spills below the frame.
+    const w = node._nkdResW;
+    w.computeSize = () => (w.hidden ? [0, -4] : [0, 24]);
+    requestAnimationFrame(() => { node.setSize([node.size[0], node.computeSize()[1]]); node.setDirtyCanvas(true, true); });
+    for (const n of ["megapixels", "aspect_ratio", "custom_width", "custom_height", "resize"])
+        wrapWidgetCallback(node, n, updateResolutionPreview);
 }
 
 function updateMaskWidgets(node) {

@@ -103,7 +103,7 @@ class NKDKleinPresampling(io.ComfyNode):
                     ),
                     display_name="Aspect Ratio"),
                 io.Float.Input("megapixels",
-                    default=1.0, min=0.1, max=4.0, step=0.1,
+                    default=1.0, min=0.1, max=1024.0, step=0.1,
                     tooltip=(
                         "How big the final image should be, in megapixels. "
                         "Bigger values mean more detail and sharper results, "
