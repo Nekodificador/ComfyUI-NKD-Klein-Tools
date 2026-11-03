@@ -2,6 +2,7 @@
 
 ## What's new in 1.13.x
 
+- **No more Megapixels limit** *(Presampling)*. Go as high as your hardware allows. The node now also shows the final size under Megapixels (e.g. `→ 3104 × 3104 px (9.19 MP)`).
 - **License is now GPL-3.0**, the same as ComfyUI. Releases up to 1.13.2 stay MIT.
 - ***Uncrop Feather* now works on masked edits without detailing** *(Postsampling)*.
 - **Prompt upsampler: new *Upsample Style* setting, *Faithful* by default** *(Klein 3)*. The upsampler now keeps to your prompt instead of rewriting the scene: no invented props, settings or looks for people, while complex scenes, counts and edits still come out right. *Full* brings back the original behaviour.

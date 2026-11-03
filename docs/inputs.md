@@ -28,7 +28,7 @@ In the node and in the box editor your images are numbered **from 0** (`ref_0`, 
 
 - **Resize** — on by default: the node chooses the output size from Aspect Ratio and Megapixels. Turn it off to keep every image at its own size and work at your input's native size (the node won't resize anything — handle sizing yourself elsewhere). With Resize off, Aspect Ratio and Megapixels are hidden since they no longer apply.
 - **Aspect Ratio** — the shape of the final image. *As Reference* matches your input image; *Custom* lets you set any size; or pick one of the named ratios.
-- **Megapixels** — how big the final image should be. Bigger = more detail, but slower.
+- **Megapixels** — how big the final image should be. Bigger = more detail, but slower. There is no upper limit, and the final size in pixels is shown right under it.
 - **Custom Width / Custom Height** — only used when *Aspect Ratio* is set to *Custom*.
 
 ### Inpainting (when you connect a mask)
