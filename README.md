@@ -17,8 +17,8 @@ https://github.com/user-attachments/assets/f84cc919-325d-465b-8d3d-e178de5f7872
 - Detail a small area at high quality. Turn on detailing to zoom into the masked zone (a face, a hand, an eye) and regenerate it with far more detail than a full-image pass gives you.
 - Combine several reference images. Extra slots appear as you connect them.
 - Dial each reference separately, or *(experimental)* send one to a specific area of the canvas.
-- With Klein 3, connect the prompt upsampler and type a short request: Presampling turns it into the detailed prompt Klein 3 is built for, looking at your references and boxes. [Prompt upsampler](docs/nodes.md#prompt-upsampler-klein-3).
-- With Klein 3, place, move, keep, remove or change things by drawing boxes right on your images, or let a detector (SAM3, YOLO…) find them so a workflow runs with nobody drawing. [How boxes work](docs/nodes.md#how-boxes-work-klein-3).
+- With Klein 3, connect the prompt upsampler and type a short request: Presampling turns it into the detailed prompt Klein 3 is built for, looking at your references and boxes. [Prompt upsampler](docs/presampling.md#prompt-upsampler-klein-3).
+- With Klein 3, place, move, keep, remove or change things by drawing boxes right on your images, or let a detector (SAM3, YOLO…) find them so a workflow runs with nobody drawing. [How boxes work](docs/presampling.md#how-boxes-work-klein-3).
 
 The node figures out which mode you're using based on what you connect, so there's no setting to flip.
 
@@ -28,15 +28,15 @@ The node figures out which mode you're using based on what you connect, so there
 
 | Node | What it does |
 |---|---|
-| [😺NKD Klein Presampling](docs/nodes.md#nkd-klein-presampling) | The starting point. Model, prompts and reference images go in here. Pick Klein 2 or Klein 3, and with Klein 3 draw boxes here. |
-| [😺NKD Klein Postsampling](docs/nodes.md#nkd-klein-postsampling) | The end point. Delivers the final image and puts everything back after inpainting or detailing. |
-| [😺NKD Klein Reference Control](docs/nodes.md#nkd-klein-reference-control) | The all-in-one reference dial, and the one to reach for today: strength, an optional per-step curve, and a zone if you give it a mask. *optional, experimental* |
-| [😺NKD Klein Reference Weight](docs/nodes.md#nkd-klein-reference-weight) | The original strength-only node. Still works; Reference Control does everything it does. *optional* |
-| [😺NKD Klein Reference Region](docs/nodes.md#nkd-klein-reference-region) | The regional half on its own, for when a Reference Weight node is already in the chain. *optional, experimental* |
-| [😺NKD Klein Reference Fit](docs/nodes.md#nkd-klein-reference-fit) | Scales a reference so it sits inside the masked zone instead of stretching across the whole canvas. *optional, experimental* |
-| [😺NKD Klein Prompt Builder](docs/nodes.md#nkd-klein-prompt-builder) | Builds a prompt from your own text plus curated preset dropdowns, with a live preview. *optional* |
-| [😺NKD Klein Box Prompt](docs/nodes.md#nkd-klein-box-prompt-optional-klein-3) | Places, moves or removes things by bounding box (Klein 3). *optional* |
-| [😺NKD Klein Box Detections](docs/nodes.md#nkd-klein-box-detections-optional-klein-3) | Turns what a detector found (a mask, SAM3 boxes, YOLO…) into things to remove, keep or change, with no drawing (Klein 3). *optional* |
+| [😺NKD Klein Presampling](docs/presampling.md) | The starting point. Model, prompts and reference images go in here. Pick Klein 2 or Klein 3, and with Klein 3 draw boxes here. |
+| [😺NKD Klein Postsampling](docs/postsampling.md) | The end point. Delivers the final image and puts everything back after inpainting or detailing. |
+| [😺NKD Klein Reference Control](docs/reference-control.md) | The all-in-one reference dial, and the one to reach for today: strength, an optional per-step curve, and a zone if you give it a mask. *optional, experimental* |
+| [😺NKD Klein Reference Weight](docs/reference-weight.md) | The original strength-only node. Still works; Reference Control does everything it does. *optional* |
+| [😺NKD Klein Reference Region](docs/reference-region.md) | The regional half on its own, for when a Reference Weight node is already in the chain. *optional, experimental* |
+| [😺NKD Klein Reference Fit](docs/reference-fit.md) | Scales a reference so it sits inside the masked zone instead of stretching across the whole canvas. *optional, experimental* |
+| [😺NKD Klein Prompt Builder](docs/prompt-builder.md) | Builds a prompt from your own text plus curated preset dropdowns, with a live preview. *optional* |
+| [😺NKD Klein Box Prompt](docs/box-prompt.md) | Places, moves or removes things by bounding box (Klein 3). *optional* |
+| [😺NKD Klein Box Detections](docs/box-detections.md) | Turns what a detector found (a mask, SAM3 boxes, YOLO…) into things to remove, keep or change, with no drawing (Klein 3). *optional* |
 
 **The chain looks like this:**
 
@@ -56,7 +56,6 @@ flowchart LR
 
 | | |
 |---|---|
-| [The nodes in detail](docs/nodes.md) | What each node does, at length. |
 | [Inputs and modes](docs/inputs.md) | Every input that changes the result, and the mode the node puts itself in when you connect one. |
 | [Recipes and workflows](docs/recipes.md) | Settings that work, an example graph, and the order things go in. |
 | [Changelog](docs/changelog.md) | What changed in each version. |
