@@ -37,6 +37,8 @@ You can make elements three ways, and they all end up in the same list: draw the
 
 Choose *Klein 3* and click **✎ Draw boxes** to place, move or remove things by drawing on your images. It uses the reference images you already connected to Presampling, so there is nothing else to wire. Your prompt stays your caption; the boxes are added to the end of it.
 
+![The box editor with one element kept in place and one new element drawn on the canvas](img/NKDKleinPresampling-boxes.png)
+
 - **Drag on empty space** to add an element; drag a box to move it, use its handles to resize, press `Del` to remove it.
 - Each element has a **source**: *No source* is a plain instruction at that box (add something here); a reference (*from ref 1*…) means "take it from there", and then you choose **Move**, **Keep in place** or **Remove**. Give it a short description.
 - Use the tabs above the image to switch between **Target** (the output canvas) and each **Ref**: draw where something *comes from* on its reference, and where it *goes* on Target. You can start on either: draw on Target, pick the source reference on the card, and the **↗ Ref** button takes you there to draw the other half (a ⚠ on a tab means an element is still waiting for its box there).
