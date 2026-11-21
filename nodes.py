@@ -51,6 +51,27 @@ class NKDKleinPresampling(io.ComfyNode):
                 io.Model.Input("model", tooltip="Your Flux Klein model."),
                 io.Clip.Input("clip", tooltip="The text encoder that goes with the model."),
                 io.Vae.Input("vae",  tooltip="The VAE that goes with the model."),
+                # Frontend 1.61+ draws Autogrow slots at their schema position.
+                io.Autogrow.Input(
+                    "ref_images", optional=True,
+                    template=io.Autogrow.TemplatePrefix(
+                        input=io.Image.Input("img",
+                            optional=True,
+                            tooltip=(
+                                "ref_0 is your main image — the one you want to edit "
+                                "or use as a starting point. Extra slots (ref_1, "
+                                "ref_2…) let you give the model more images to draw "
+                                "inspiration from."
+                            )),
+                        prefix="ref_",
+                        min=1,
+                        max=8,
+                    ),
+                    tooltip=(
+                        "Connect your input image to ref_0. More slots will appear "
+                        "automatically if you want to add extra reference images."
+                    ),
+                ),
 
                 io.Combo.Input("model_family", options=["Klein 2", "Klein 3"], default="Klein 2",
                     display_name="Model",
@@ -251,30 +272,6 @@ class NKDKleinPresampling(io.ComfyNode):
                         "needs to be drawn. Full is BFL's original upsampler: it plans every "
                         "detail you left open, adding props, people's looks and scenery."
                     )),
-                # ---- reference images (autogrow) ----
-                # Last and optional (the frontend lists required sockets first): the slots it adds
-                # are appended at the bottom, so they must already sit below mask/boxes/upsampler.
-                io.Autogrow.Input(
-                    "ref_images", optional=True,
-                    template=io.Autogrow.TemplatePrefix(
-                        input=io.Image.Input("img",
-                            optional=True,
-                            tooltip=(
-                                "ref_0 is your main image — the one you want to edit "
-                                "or use as a starting point. Extra slots (ref_1, "
-                                "ref_2…) let you give the model more images to draw "
-                                "inspiration from."
-                            )),
-                        prefix="ref_",
-                        min=1,
-                        max=8,
-                    ),
-                    tooltip=(
-                        "Connect your input image to ref_0. More slots will appear "
-                        "automatically if you want to add extra reference images."
-                    ),
-                ),
-
             ],
             outputs=[
                 io.Model.Output("model"),
